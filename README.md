@@ -91,7 +91,7 @@ Real-backend smoke tests are intentionally separate; they need installed and aut
 
 Created and maintained by Jan Franke.
 
-Peter Steinberger's [codex-first](https://github.com/steipete/agent-scripts) skill inspired treating Codex as a focused coding workhorse. Matt Pocock's public skills repo helped shape the lightweight skill-catalog structure and the code-review subagent framing.
+Peter Steinberger's [codex-first](https://github.com/steipete/agent-scripts) skill inspired treating Codex as a focused coding workhorse. Matt Pocock's [skills](https://github.com/mattpocock/skills) repo helped shape the lightweight skill-catalog structure and the code-review subagent framing.
 
 ## License
 
