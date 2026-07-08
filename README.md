@@ -1,28 +1,55 @@
 # Franke Skills
 
-Agent skills for practical engineering workflows.
+Keep the smart model in the chair. Send the coding to detached workers.
 
-This repo starts with `cxcc-subagent`: a cross-tool subagent supervisor for running Codex CLI and Claude Code as focused worker agents while a stronger model keeps orchestration, steering, and review in the main session.
+Newer orchestration-grade models (Fable-class and up) are excellent at planning, decomposing, and judging work. Actual coding still runs best in isolated executors with their own context, logs, tests, and failure states. This repo gives the orchestrator a way to stay in control while it fans out the token-heavy implementation, review, and investigation to cheaper or more specialized workers.
 
-The bet is simple: newer orchestration-grade models, including Fable-class models, are very good at planning, decomposing, and judging work. Coding work still benefits from isolated executors with their own context, logs, tests, and failure states. Cross-agent workflows let the orchestrator stay in control while delegating token-heavy implementation, review, and investigation to cheaper or more specialized workers.
+The first skill, `cxcc-subagent`, wraps both Codex CLI and Claude Code as detached coding subagents behind one small, agent-first CLI.
+
+## Why this over `codex exec` directly
+
+Three things you don't get from spawning a raw coding CLI in a loop:
+
+1. **A stuck run comes back as state, not silence.** A watchdog reaps true hangs, and when a worker needs input it surfaces as an explicit `awaiting_reply` instead of dying quietly in a log. The orchestrator polls attention-first: `awaiting_reply` / `failed` / `stalled` sort to the top.
+2. **Two backends, one interface.** Codex CLI (`codex exec --json`) and Claude Code (`claude -p --output-format stream-json`) run through the same verbs. Pick the workhorse per task; the orchestrator doesn't change.
+3. **Review is built in, not improvised.** Composable role prompts include two-axis code review, against repo standards and against the spec the change was built from, run in parallel and adjudicated.
+
+Division of labour stays honest: Codex types, you think. Spec before, review after.
 
 ## Quickstart
 
-Install from this repository with the skills installer:
-
 ```bash
-npx skills@latest add <github-user>/franke_skills
+npx skills@latest add boldprojekte/franke_skills
 ```
 
-While the repository is private, install from a checked-out copy or from the private GitHub URL supported by your local installer.
+Needs Python 3.10+ and at least one backend CLI (`codex` or `claude`) on your `PATH`. Task state lives under `~/.codex-agents` by default.
+
+## The loop
+
+```bash
+CDX="skills/engineering/cxcc-subagent/scripts/cdx.py"
+
+# 1. Spawn a worker from a role + a work order - returns instantly, runs detached
+python3 $CDX spawn -f roles/general.md -f task.md -C /path/to/repo --json
+
+# 2. Go do other things. The run stays alive across everything short of a machine restart.
+
+# 3. Check in at natural pauses - attention-first, not on a poll loop
+python3 $CDX list --json
+
+# 4. Collect, then verify it yourself: read the diff, run the proof command
+python3 $CDX result <task> --json
+```
+
+Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answering a worker's question and steering a wrong turn share one verb (`send`), same thread, full context retained.
 
 ## Skills
 
 ### `cxcc-subagent`
 
-Spawn, monitor, steer, and collect detached coding subagents through `scripts/cdx.py`.
+Spawn, monitor, steer, and collect detached coding subagents via `scripts/cdx.py`.
 
-Use it when you want an orchestrating agent to fan out implementation, refactor, test-writing, investigation, or review work while the main session keeps moving. It stores task state under `~/.codex-agents` by default and requires Python 3.10+ plus the target backend CLI on `PATH`.
+Use it when an orchestrating agent should fan out implementation, refactors, test-writing, investigation, or review while the main session keeps moving.
 
 Supported backends:
 
@@ -31,23 +58,24 @@ Supported backends:
 
 Platform support:
 
-- macOS: tested locally
-- Linux: expected to work; should be CI-tested before public release
+- macOS: tested locally, CI-covered
+- Linux: CI-covered
 - Windows: experimental until the process supervisor passes on `windows-latest`
 
-## Repository Layout
+## Repository layout
 
 ```text
 .claude-plugin/plugin.json
-skills/engineering/cxcc-subagent/SKILL.md
-skills/engineering/cxcc-subagent/references/
-skills/engineering/cxcc-subagent/scripts/cdx.py
-skills/engineering/cxcc-subagent/scripts/tests/test_cdx.py
+skills/engineering/cxcc-subagent/
+  SKILL.md
+  references/            # spec, review contract, role prompts
+  scripts/cdx.py         # the supervisor CLI
+  scripts/tests/         # fast unit suite
 ```
 
 ## Development
 
-Run the fast local test suite:
+Run the fast local test suite from `skills/engineering/cxcc-subagent/scripts/tests`:
 
 ```bash
 python3 -m unittest -v \
@@ -57,19 +85,13 @@ python3 -m unittest -v \
   test_cdx.CliSubprocessTests
 ```
 
-from:
-
-```bash
-skills/engineering/cxcc-subagent/scripts/tests
-```
-
-The real backend smoke tests are intentionally separate because they require installed and authenticated agent CLIs.
+Real-backend smoke tests are intentionally separate; they need installed and authenticated agent CLIs.
 
 ## Credits
 
 Created and maintained by Jan Franke.
 
-Small references: Matt Pocock's public skills repo helped shape the lightweight skill-catalog structure and code-review subagent framing; Peter Steinberger's `codex-first` skill inspired treating Codex as a focused coding workhorse.
+Peter Steinberger's [codex-first](https://github.com/steipete/agent-scripts) skill inspired treating Codex as a focused coding workhorse. Matt Pocock's public skills repo helped shape the lightweight skill-catalog structure and the code-review subagent framing.
 
 ## License
 
