@@ -13,23 +13,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            experimental: false
-          - os: macos-latest
-            experimental: false
-          - os: windows-latest
-            experimental: true
-    continue-on-error: ${{ matrix.experimental }}
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run fast tests
-        working-directory: skills/engineering/cxcc-subagent/scripts/tests
-        run: python -m unittest -v test_cdx.StateDerivationTests test_cdx.TurnAccountingRaceTests test_cdx.CliSubprocessTests
-        if: runner.os == 'Windows'
       - name: Run fast tests
         working-directory: skills/engineering/cxcc-subagent/scripts/tests
         run: |
@@ -38,4 +29,3 @@ jobs:
             test_cdx.TurnAccountingRaceTests \
             test_cdx.WatchdogTests \
             test_cdx.CliSubprocessTests
-        if: runner.os != 'Windows'

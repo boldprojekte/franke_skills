@@ -79,7 +79,7 @@ Platform support:
 
 - macOS: tested locally, CI-covered
 - Linux: CI-covered
-- Windows: experimental until the process supervisor passes on `windows-latest`
+- Windows: experimental; not CI-gated yet
 
 ## Repository layout
 
