@@ -18,19 +18,36 @@ Division of labour stays honest: Codex types, you think. Spec before, review aft
 
 ## Quickstart
 
+Install for Codex:
+
 ```bash
-npx skills@latest add boldprojekte/franke_skills
+npx skills@latest add boldprojekte/franke_skills \
+  --skill cxcc-subagent \
+  --agent codex \
+  --copy -y
 ```
+
+Install for Codex and Claude Code:
+
+```bash
+npx skills@latest add boldprojekte/franke_skills \
+  --skill cxcc-subagent \
+  --agent codex claude-code \
+  --copy -y
+```
+
+That writes the skill to `.agents/skills/cxcc-subagent` for Codex and `.claude/skills/cxcc-subagent` for Claude Code.
 
 Needs Python 3.10+ and at least one backend CLI (`codex` or `claude`) on your `PATH`. Task state lives under `~/.codex-agents` by default.
 
 ## The loop
 
 ```bash
-CDX="skills/engineering/cxcc-subagent/scripts/cdx.py"
+CDX=".agents/skills/cxcc-subagent/scripts/cdx.py"
+ROLES=".agents/skills/cxcc-subagent/references/roles"
 
 # 1. Spawn a worker from a role + a work order - returns instantly, runs detached
-python3 $CDX spawn -f roles/general.md -f task.md -C /path/to/repo --json
+python3 $CDX spawn -f $ROLES/general.md -f task.md -C /path/to/repo --json
 
 # 2. Go do other things. The run stays alive across everything short of a machine restart.
 
@@ -42,6 +59,8 @@ python3 $CDX result <task> --json
 ```
 
 Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answering a worker's question and steering a wrong turn share one verb (`send`), same thread, full context retained.
+
+When using the source checkout directly, replace `.agents/skills/cxcc-subagent` with `skills/engineering/cxcc-subagent`.
 
 ## Skills
 

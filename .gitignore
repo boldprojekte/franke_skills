@@ -7,6 +7,10 @@ __pycache__/
 .venv/
 venv/
 node_modules/
+node-compile-cache/
+.agents/
+.claude/
+skills-lock.json
 dist/
 build/
 .env
