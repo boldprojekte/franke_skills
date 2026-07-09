@@ -4,14 +4,14 @@ Keep the smart model in the chair. Send the coding to detached workers.
 
 Newer orchestration-grade models (Fable-class and up) are excellent at planning, decomposing, and judging work. Actual coding still runs best in isolated executors with their own context, logs, tests, and failure states. This repo gives the orchestrator a way to stay in control while it fans out the token-heavy implementation, review, and investigation to cheaper or more specialized workers.
 
-The first skill, `cxcc-subagent`, wraps both Codex CLI and Claude Code as detached coding subagents behind one small, agent-first CLI.
+The first skill, `cxcc-subagent`, wraps Codex CLI, Claude Code, and Grok Build CLI as detached coding subagents behind one small, agent-first CLI.
 
 ## Why this over `codex exec` directly
 
 Three things you don't get from spawning a raw coding CLI in a loop:
 
 1. **A stuck run comes back as state, not silence.** A watchdog reaps true hangs, and when a worker needs input it surfaces as an explicit `awaiting_reply` instead of dying quietly in a log. The orchestrator polls attention-first: `awaiting_reply` / `failed` / `stalled` sort to the top.
-2. **Two backends, one interface.** Codex CLI (`codex exec --json`) and Claude Code (`claude -p --output-format stream-json`) run through the same verbs. Pick the workhorse per task; the orchestrator doesn't change.
+2. **Three backends, one interface.** Codex CLI (`codex exec --json`), Claude Code (`claude -p --output-format stream-json`), and Grok Build CLI (`grok --prompt-file --output-format streaming-json`) run through the same verbs. Pick the workhorse per task; the orchestrator doesn't change.
 3. **Review is built in, not improvised.** Composable role prompts include two-axis code review, against repo standards and against the spec the change was built from, run in parallel and adjudicated.
 
 Division of labour stays honest: Codex types, you think. Spec before, review after.
@@ -38,7 +38,7 @@ npx skills@latest add boldprojekte/franke_skills \
 
 That writes the skill to `.agents/skills/cxcc-subagent` for Codex and `.claude/skills/cxcc-subagent` for Claude Code.
 
-Needs Python 3.10+ and at least one backend CLI (`codex` or `claude`) on your `PATH`. Task state lives under `~/.codex-agents` by default.
+Needs Python 3.10+ and at least one backend CLI (`codex`, `claude`, or `grok`) on your `PATH`. Task state lives under `~/.codex-agents` by default.
 
 ## The loop
 
@@ -74,6 +74,7 @@ Supported backends:
 
 - Codex CLI via `codex exec --json`
 - Claude Code via `claude -p --output-format stream-json`
+- Grok Build CLI via `grok --prompt-file --output-format streaming-json`
 
 Platform support:
 

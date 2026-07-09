@@ -23,11 +23,6 @@ TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
 TURN_STARTUP_GRACE_S = 15
 CDX_EFFORTS = ("medium", "high", "max")
-BACKEND_EFFORTS = {
-    "codex": {"medium": "medium", "high": "high", "max": "xhigh"},
-    "claude": {"medium": "high", "high": "xhigh", "max": "max"},
-}
-CONFIG_KEYS = {"model.codex", "model.claude"}
 SPAWN_PREAMBLE = """[orchestration protocol] You are run non-interactively by an orchestrating
 agent. If you hit a decision you cannot make yourself (missing access,
 ambiguous requirement, a destructive or irreversible choice), do not guess:
@@ -46,6 +41,290 @@ class CdxError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class CodexBackend:
+    """`codex exec --json`: prompt via stdin, thread via thread.started events."""
+
+    name = "codex"
+    bin_name, bin_env, install_hint = "codex", "CDX_CODEX_BIN", "install Codex CLI"
+    efforts = {"medium": "medium", "high": "high", "max": "xhigh"}
+    uses_prompt_file = False  # prompt is piped on stdin
+
+    def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
+        model = meta.get("model")
+        effort = backend_effort(self.name, meta.get("effort"))
+        if mode == "spawn":
+            repo = Path(str(meta["repo"]))
+            cmd = [backend_bin, "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "-C", str(repo)]
+            if not is_git_repo(repo):
+                cmd.append("--skip-git-repo-check")
+            if model:
+                cmd += ["-m", str(model)]
+            if effort:
+                cmd += ["-c", f'model_reasoning_effort="{effort}"']
+            cmd.append("-")
+            return cmd
+        thread_id = meta.get("thread_id")
+        if not thread_id:
+            raise CdxError(4, "task has no thread_id yet; wait for status or spawn a new task")
+        cmd = [backend_bin, "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json"]
+        if model:
+            cmd += ["-m", str(model)]
+        if effort:
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
+        cmd += [str(thread_id), "-"]
+        return cmd
+
+    def run_cwd(self, meta: dict[str, Any], mode: str) -> str | None:
+        # spawn gets -C <repo>; resume has no -C, so it needs the process cwd
+        return meta.get("repo") if mode == "resume" else None
+
+    def thread_id(self, events: list[dict[str, Any]]) -> str | None:
+        for event in reversed(events):
+            thread_id = event.get("thread_id")
+            if event.get("type") == "thread.started" and isinstance(thread_id, str):
+                return thread_id
+        return None
+
+    def turn_count(self, events: list[dict[str, Any]]) -> int:
+        return sum(1 for event in events if event.get("type") == "turn.completed")
+
+    def failed(self, events: list[dict[str, Any]]) -> bool:
+        return has_event(events, "turn.failed", "thread.error")
+
+    def last_agent_message(self, events: list[dict[str, Any]]) -> str | None:
+        for event in reversed(events):
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    return text
+            if event.get("type") == "agent_message" and isinstance(event.get("text"), str):
+                return event["text"]
+        return None
+
+    def last_activity(self, event: dict[str, Any]) -> str | None:
+        typ = event.get("type")
+        item = event.get("item")
+        if isinstance(item, dict):
+            itype = item.get("type")
+            if itype == "agent_message" and isinstance(item.get("text"), str):
+                return f"msg: {condense(item['text'])}"
+            if "command" in item:
+                return f"command: {condense(str(item['command']))}"
+            if "path" in item:
+                return f"file: {condense(str(item['path']))}"
+        if typ:
+            return str(typ)
+        return None
+
+    def summarize_event(self, event: dict[str, Any]) -> str | None:
+        typ = str(event.get("type") or "event")
+        item = event.get("item")
+        if isinstance(item, dict):
+            itype = str(item.get("type") or "item")
+            if itype == "agent_message" and isinstance(item.get("text"), str):
+                return f"msg {condense(item['text'], 120)}"
+            if "command" in item:
+                text = f"command {item['command']}"
+                if "exit_code" in item:
+                    text += f" exit={item['exit_code']}"
+                return condense(text, 160)
+            if "path" in item:
+                return f"file {item['path']}"
+            return condense(f"{itype} {json.dumps(item, separators=(',', ':'))}", 160)
+        if typ == "turn.completed":
+            return "turn.completed"
+        if typ in {"turn.failed", "thread.error"}:
+            return condense(f"{typ} {event.get('message') or event.get('error') or ''}", 160)
+        return typ
+
+    def thinking_tail(self, tdir: Path, events: list[dict[str, Any]], chars: int) -> str:
+        # codex streams reasoning on stderr; tail the raw log
+        path = tdir / "stderr.log"
+        if not path.exists():
+            return ""
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - chars * 4))
+            return ansi_strip(handle.read().decode("utf-8", errors="replace"))[-chars:]
+
+
+class ClaudeBackend:
+    """`claude -p --output-format stream-json`: prompt via stdin, session_id events."""
+
+    name = "claude"
+    bin_name, bin_env, install_hint = "claude", "CDX_CLAUDE_BIN", "install Claude Code"
+    efforts = {"medium": "high", "high": "xhigh", "max": "max"}
+    uses_prompt_file = False  # prompt is piped on stdin
+
+    def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
+        model = meta.get("model")
+        effort = backend_effort(self.name, meta.get("effort"))
+        if mode == "spawn":
+            cmd = [backend_bin, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"]
+        else:
+            thread_id = meta.get("thread_id")
+            if not thread_id:
+                raise CdxError(4, "task has no thread_id yet; wait for status or spawn a new task")
+            cmd = [
+                backend_bin,
+                "-p",
+                "--resume",
+                str(thread_id),
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--dangerously-skip-permissions",
+            ]
+        if model:
+            cmd += ["--model", str(model)]
+        if effort:
+            cmd += ["--effort", str(effort)]
+        return cmd
+
+    def run_cwd(self, meta: dict[str, Any], mode: str) -> str | None:
+        return meta.get("repo")
+
+    def thread_id(self, events: list[dict[str, Any]]) -> str | None:
+        for event in events:
+            session_id = event.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
+        return None
+
+    def turn_count(self, events: list[dict[str, Any]]) -> int:
+        return sum(1 for event in events if event.get("type") == "result")
+
+    def failed(self, events: list[dict[str, Any]]) -> bool:
+        for event in events:
+            subtype = event.get("subtype")
+            if event.get("type") == "result":
+                if event.get("is_error") is True:
+                    return True
+                if isinstance(subtype, str) and "error" in subtype.lower():
+                    return True
+        return False
+
+    def last_agent_message(self, events: list[dict[str, Any]]) -> str | None:
+        for event in reversed(events):
+            if event.get("type") == "result" and isinstance(event.get("result"), str):
+                return event["result"]
+        for event in reversed(events):
+            if event.get("type") == "assistant":
+                text = text_from_claude_message(event)
+                if text is not None:
+                    return text
+        return None
+
+    def last_activity(self, event: dict[str, Any]) -> str | None:
+        return summarize_claude_event(event)
+
+    def summarize_event(self, event: dict[str, Any]) -> str | None:
+        return summarize_claude_event(event)
+
+    def thinking_tail(self, tdir: Path, events: list[dict[str, Any]], chars: int) -> str:
+        return claude_thinking_tail(events, chars)
+
+
+class GrokBackend:
+    """xAI Grok Build CLI: prompt via --prompt-file, streaming-json events.
+
+    The stream carries only thought/text deltas plus a terminal `end` event
+    (with sessionId) or an `error` event. Tool calls are NOT surfaced, so peek
+    and last_activity are sparse for grok; stall detection still works because
+    thought/text deltas keep bytes flowing.
+    """
+
+    name = "grok"
+    bin_name, bin_env, install_hint = "grok", "CDX_GROK_BIN", "install Grok CLI"
+    # grok's --reasoning-effort accepts any string unvalidated; assume low/medium/high.
+    # grok is cheap, so medium/high map straight through instead of one tier down
+    efforts = {"medium": "medium", "high": "high", "max": "high"}
+    uses_prompt_file = True  # prompt is passed as --prompt-file, not stdin
+
+    def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
+        model = meta.get("model")
+        effort = backend_effort(self.name, meta.get("effort"))
+        if mode == "spawn":
+            cmd = [backend_bin, "--prompt-file", str(prompt_file), "--output-format", "streaming-json", "--permission-mode", "bypassPermissions"]
+        else:
+            thread_id = meta.get("thread_id")
+            if not thread_id:
+                raise CdxError(4, "task has no thread_id yet; wait for status or spawn a new task")
+            cmd = [backend_bin, "--resume", str(thread_id), "--prompt-file", str(prompt_file), "--output-format", "streaming-json", "--permission-mode", "bypassPermissions"]
+        if model:
+            cmd += ["-m", str(model)]
+        if effort:
+            cmd += ["--reasoning-effort", str(effort)]
+        return cmd
+
+    def run_cwd(self, meta: dict[str, Any], mode: str) -> str | None:
+        return meta.get("repo")
+
+    def thread_id(self, events: list[dict[str, Any]]) -> str | None:
+        # sessionId only appears on the terminal `end` event; None mid-run is expected
+        for event in reversed(events):
+            if event.get("type") == "end":
+                session_id = event.get("sessionId")
+                if isinstance(session_id, str) and session_id:
+                    return session_id
+        return None
+
+    def turn_count(self, events: list[dict[str, Any]]) -> int:
+        return sum(1 for event in events if event.get("type") == "end")
+
+    def failed(self, events: list[dict[str, Any]]) -> bool:
+        return has_event(events, "error")
+
+    def last_agent_message(self, events: list[dict[str, Any]]) -> str | None:
+        # text deltas of the last completed turn: those between the 2nd-to-last and last `end`
+        end_indices = [index for index, event in enumerate(events) if event.get("type") == "end"]
+        if not end_indices:
+            return None
+        last_end = end_indices[-1]
+        prev_end = end_indices[-2] if len(end_indices) >= 2 else -1
+        parts = [
+            event["data"]
+            for event in events[prev_end + 1 : last_end]
+            if event.get("type") == "text" and isinstance(event.get("data"), str)
+        ]
+        return "".join(parts) if parts else None
+
+    def last_activity(self, event: dict[str, Any]) -> str | None:
+        return self.summarize_event(event)
+
+    def summarize_event(self, event: dict[str, Any]) -> str | None:
+        typ = event.get("type")
+        if typ in {"thought", "text"}:
+            return None  # per-delta events are too granular to summarize
+        if typ == "end":
+            return f"end.{event.get('stopReason') or 'EndTurn'}"
+        if typ == "error":
+            return condense(f"error {event.get('message') or ''}", 160)
+        return str(typ) if typ else None
+
+    def thinking_tail(self, tdir: Path, events: list[dict[str, Any]], chars: int) -> str:
+        pieces: list[str] = []
+        total = 0
+        for event in reversed(events):
+            if event.get("type") != "thought":
+                continue
+            data = event.get("data")
+            if not isinstance(data, str) or not data:
+                continue
+            pieces.append(data)
+            total += len(data)
+            if total >= chars:
+                break
+        return "".join(reversed(pieces))[-chars:]
+
+
+BACKENDS = {"codex": CodexBackend(), "claude": ClaudeBackend(), "grok": GrokBackend()}
+CONFIG_KEYS = {f"model.{name}" for name in BACKENDS}
 
 
 def eprint(message: str) -> None:
@@ -134,23 +413,14 @@ def locate_binary(name: str, env_var: str, install_hint: str) -> str:
     raise CdxError(7, f"{name} binary not found; {install_hint} or set {env_var}")
 
 
-def locate_codex() -> str:
-    return locate_binary("codex", "CDX_CODEX_BIN", "install Codex CLI")
-
-
-def locate_claude() -> str:
-    return locate_binary("claude", "CDX_CLAUDE_BIN", "install Claude Code")
-
-
 def locate_backend(backend: str) -> str:
-    if backend == "claude":
-        return locate_claude()
-    return locate_codex()
+    adapter = BACKENDS.get(backend) or BACKENDS["codex"]
+    return locate_binary(adapter.bin_name, adapter.bin_env, adapter.install_hint)
 
 
 def meta_backend(meta: dict[str, Any]) -> str:
     value = meta.get("backend")
-    return str(value) if value in {"codex", "claude"} else "codex"
+    return str(value) if value in BACKENDS else "codex"
 
 
 def validate_effort(effort: str | None) -> None:
@@ -164,7 +434,7 @@ def backend_effort(backend: str, effort: str | None) -> str | None:
     if not effort:
         return None
     validate_effort(effort)
-    return BACKEND_EFFORTS[backend][effort]
+    return BACKENDS[backend].efforts[effort]
 
 
 def load_config(root: Path) -> dict[str, Any]:
@@ -309,17 +579,7 @@ def read_events(tdir: Path) -> list[dict[str, Any]]:
 
 
 def newest_thread_id(events: list[dict[str, Any]], backend: str = "codex") -> str | None:
-    if backend == "claude":
-        for event in events:
-            session_id = event.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                return session_id
-        return None
-    for event in reversed(events):
-        thread_id = event.get("thread_id")
-        if event.get("type") == "thread.started" and isinstance(thread_id, str):
-            return thread_id
-    return None
+    return BACKENDS.get(backend, BACKENDS["codex"]).thread_id(events)
 
 
 def text_from_claude_message(event: dict[str, Any]) -> str | None:
@@ -348,25 +608,7 @@ def text_from_claude_message(event: dict[str, Any]) -> str | None:
 
 
 def last_agent_message(events: list[dict[str, Any]], backend: str = "codex") -> str | None:
-    if backend == "claude":
-        for event in reversed(events):
-            if event.get("type") == "result" and isinstance(event.get("result"), str):
-                return event["result"]
-        for event in reversed(events):
-            if event.get("type") == "assistant":
-                text = text_from_claude_message(event)
-                if text is not None:
-                    return text
-        return None
-    for event in reversed(events):
-        item = event.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
-            text = item.get("text")
-            if isinstance(text, str):
-                return text
-        if event.get("type") == "agent_message" and isinstance(event.get("text"), str):
-            return event["text"]
-    return None
+    return BACKENDS.get(backend, BACKENDS["codex"]).last_agent_message(events)
 
 
 def extract_question(message: str | None) -> str | None:
@@ -384,9 +626,7 @@ def extract_question(message: str | None) -> str | None:
 
 
 def turn_count(events: list[dict[str, Any]], backend: str = "codex") -> int:
-    if backend == "claude":
-        return sum(1 for event in events if event.get("type") == "result")
-    return sum(1 for event in events if event.get("type") == "turn.completed")
+    return BACKENDS.get(backend, BACKENDS["codex"]).turn_count(events)
 
 
 def turns_launched(meta: dict[str, Any], events: list[dict[str, Any]] | None = None) -> int:
@@ -411,36 +651,24 @@ def has_event(events: list[dict[str, Any]], *types: str) -> bool:
     return any(event.get("type") in wanted for event in events)
 
 
-def claude_failed(events: list[dict[str, Any]]) -> bool:
-    for event in events:
-        subtype = event.get("subtype")
-        if event.get("type") == "result":
-            if event.get("is_error") is True:
-                return True
-            if isinstance(subtype, str) and "error" in subtype.lower():
-                return True
-    return False
-
-
 def derive_state(meta: dict[str, Any], events: list[dict[str, Any]], alive: bool) -> str:
     if meta.get("state") in {"killed", "stalled"}:
         return str(meta["state"])
 
     backend = meta_backend(meta)
+    adapter = BACKENDS[backend]
     launched = turns_launched(meta, events)
-    completed = turn_count(events, backend)
+    completed = adapter.turn_count(events)
     if completed < launched:
         launched_at = float(meta.get("turn_launched_at") or meta.get("spawned_at") or 0)
         if alive or now() - launched_at < TURN_STARTUP_GRACE_S:
             return "working"
         return "failed"
 
-    if backend == "claude" and claude_failed(events):
+    if adapter.failed(events):
         return "failed"
     if completed >= launched and completed > 0:
-        return "awaiting_reply" if extract_question(last_agent_message(events, backend)) is not None else "done"
-    if has_event(events, "turn.failed", "thread.error"):
-        return "failed"
+        return "awaiting_reply" if extract_question(adapter.last_agent_message(events)) is not None else "done"
     if alive:
         return "working"
     if events:
@@ -454,7 +682,7 @@ def refresh_meta(tdir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], str,
     meta = load_meta(tdir)
     events = read_events(tdir)
     changed = False
-    if meta.get("backend") not in {"codex", "claude"}:
+    if meta.get("backend") not in BACKENDS:
         meta["backend"] = "codex"
         changed = True
     backend = meta_backend(meta)
@@ -552,24 +780,11 @@ def condense(text: str, limit: int = 80) -> str:
 
 
 def last_activity(events: list[dict[str, Any]], backend: str = "codex") -> str | None:
+    adapter = BACKENDS.get(backend, BACKENDS["codex"])
     for event in reversed(events):
-        if backend == "claude":
-            summary = summarize_claude_event(event)
-            if summary:
-                return summary
-            continue
-        typ = event.get("type")
-        item = event.get("item")
-        if isinstance(item, dict):
-            itype = item.get("type")
-            if itype == "agent_message" and isinstance(item.get("text"), str):
-                return f"msg: {condense(item['text'])}"
-            if "command" in item:
-                return f"command: {condense(str(item['command']))}"
-            if "path" in item:
-                return f"file: {condense(str(item['path']))}"
-        if typ:
-            return str(typ)
+        summary = adapter.last_activity(event)
+        if summary:
+            return summary
     return None
 
 
@@ -580,56 +795,7 @@ def is_git_repo(path: Path) -> bool:
 
 def backend_cmd(meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
     backend = meta_backend(meta)
-    model = meta.get("model")
-    effort = backend_effort(backend, meta.get("effort"))
-    if backend == "claude":
-        if mode == "spawn":
-            cmd = [backend_bin, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"]
-            if model:
-                cmd += ["--model", str(model)]
-            if effort:
-                cmd += ["--effort", str(effort)]
-            return cmd
-        thread_id = meta.get("thread_id")
-        if not thread_id:
-            raise CdxError(4, "task has no thread_id yet; wait for status or spawn a new task")
-        cmd = [
-            backend_bin,
-            "-p",
-            "--resume",
-            str(thread_id),
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--dangerously-skip-permissions",
-        ]
-        if model:
-            cmd += ["--model", str(model)]
-        if effort:
-            cmd += ["--effort", str(effort)]
-        return cmd
-    if mode == "spawn":
-        repo = Path(str(meta["repo"]))
-        cmd = [backend_bin, "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "-C", str(repo)]
-        if not is_git_repo(repo):
-            cmd.append("--skip-git-repo-check")
-        if model:
-            cmd += ["-m", str(model)]
-        if effort:
-            cmd += ["-c", f'model_reasoning_effort="{effort}"']
-        cmd.append("-")
-        return cmd
-    thread_id = meta.get("thread_id")
-    if not thread_id:
-        raise CdxError(4, "task has no thread_id yet; wait for status or spawn a new task")
-    cmd = [backend_bin, "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json"]
-    if model:
-        cmd += ["-m", str(model)]
-    if effort:
-        cmd += ["-c", f'model_reasoning_effort="{effort}"']
-    cmd += [str(thread_id), "-"]
-    return cmd
+    return BACKENDS[backend].build_cmd(meta, prompt_file, mode, backend_bin)
 
 
 def interrupt_pid(pid: int | None) -> None:
@@ -744,12 +910,15 @@ def run_turn(args: argparse.Namespace) -> int:
     backend = args.backend or meta_backend(meta)
     meta["backend"] = backend
     mode = args.mode
+    adapter = BACKENDS[backend]
     prompt_file = Path(args.prompt_file)
-    cmd = backend_cmd(meta, prompt_file, mode, args.backend_bin)
+    cmd = adapter.build_cmd(meta, prompt_file, mode, args.backend_bin)
     out_mode = "wb" if mode == "spawn" else "ab"
-    with prompt_file.open("rb") as stdin, (tdir / "events.jsonl").open(out_mode) as stdout, (tdir / "stderr.log").open(out_mode) as stderr:
-        cwd = meta.get("repo") if (backend == "claude" or mode == "resume") else None
-        proc = subprocess.Popen(cmd, stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, start_new_session=True)
+    # grok reads the prompt from --prompt-file, not stdin; other backends pipe it in
+    stdin_file = None if adapter.uses_prompt_file else prompt_file.open("rb")
+    with (tdir / "events.jsonl").open(out_mode) as stdout, (tdir / "stderr.log").open(out_mode) as stderr:
+        cwd = adapter.run_cwd(meta, mode)
+        proc = subprocess.Popen(cmd, stdin=stdin_file or subprocess.DEVNULL, stdout=stdout, stderr=stderr, cwd=cwd, start_new_session=True)
         meta["pid"] = proc.pid
         meta["state"] = "working"
         if not meta.get("turns_launched"):
@@ -801,6 +970,8 @@ def run_turn(args: argparse.Namespace) -> int:
                 save_meta(tdir, meta)
                 return 0
             next_check = now() + check_interval
+    if stdin_file is not None:
+        stdin_file.close()
     events = read_events(tdir)
     meta = load_meta(tdir)
     backend = meta_backend(meta)
@@ -893,27 +1064,7 @@ def summarize_claude_event(event: dict[str, Any]) -> str | None:
 
 
 def summarize_event(event: dict[str, Any], backend: str = "codex") -> str | None:
-    if backend == "claude":
-        return summarize_claude_event(event)
-    typ = str(event.get("type") or "event")
-    item = event.get("item")
-    if isinstance(item, dict):
-        itype = str(item.get("type") or "item")
-        if itype == "agent_message" and isinstance(item.get("text"), str):
-            return f"msg {condense(item['text'], 120)}"
-        if "command" in item:
-            text = f"command {item['command']}"
-            if "exit_code" in item:
-                text += f" exit={item['exit_code']}"
-            return condense(text, 160)
-        if "path" in item:
-            return f"file {item['path']}"
-        return condense(f"{itype} {json.dumps(item, separators=(',', ':'))}", 160)
-    if typ == "turn.completed":
-        return "turn.completed"
-    if typ in {"turn.failed", "thread.error"}:
-        return condense(f"{typ} {event.get('message') or event.get('error') or ''}", 160)
-    return typ
+    return BACKENDS.get(backend, BACKENDS["codex"]).summarize_event(event)
 
 
 def ansi_strip(text: str) -> str:
@@ -978,18 +1129,7 @@ def peek_task(args: argparse.Namespace) -> int:
     thinking = None
     if args.thinking is not None:
         chars = min(int(args.thinking), 1500)
-        if backend == "claude":
-            thinking = claude_thinking_tail(events, chars)
-        else:
-            path = tdir / "stderr.log"
-            if path.exists():
-                with path.open("rb") as handle:
-                    handle.seek(0, os.SEEK_END)
-                    size = handle.tell()
-                    handle.seek(max(0, size - chars * 4))
-                    thinking = ansi_strip(handle.read().decode("utf-8", errors="replace"))[-chars:]
-            else:
-                thinking = ""
+        thinking = BACKENDS.get(backend, BACKENDS["codex"]).thinking_tail(tdir, events, chars)
     if args.json:
         json_out({"task": name, "backend": backend, "items": lines, "thinking": thinking})
     else:
@@ -1039,21 +1179,26 @@ def send_task(args: argparse.Namespace) -> int:
     ensure_state(root)
     name, tdir = resolve_task(root, args.task)
     payload = status_payload(name, tdir)
-    if payload["state"] in {"working", "stalled"} and not args.now:
+    if payload["state"] == "working" and not args.now:
         raise CdxError(4, "task is running; use --now to interrupt-and-redirect, or wait for result")
-    if payload["state"] in {"working", "stalled"} and args.now:
+    if payload["state"] in {"working", "stalled"}:
+        # stalled means the watchdog already killed the process; interrupt is a
+        # safety net in case that kill failed, so no --now gate is needed
         interrupt_pid(payload.get("pid"))
     prompt = with_preamble(read_prompt(args), SEND_PREAMBLE, args.no_preamble)
     turns_dir = tdir / "turns"
     turns_dir.mkdir(exist_ok=True)
     meta = load_meta(tdir)
     backend = meta_backend(meta)
-    turn_no = int(meta.get("turns_launched") or payload.get("turns_launched") or payload.get("turns") or turn_count(read_events(tdir), backend) or 1) + 1
-    prompt_path = turns_dir / f"{turn_no:04d}.md"
+    completed = turn_count(read_events(tdir), backend)
+    launch_no = int(meta.get("turns_launched") or payload.get("turns_launched") or payload.get("turns") or completed or 1) + 1
+    prompt_path = turns_dir / f"{launch_no:04d}.md"
     prompt_path.write_text(prompt, encoding="utf-8")
     meta["state"] = "working"
-    meta["turns"] = turn_no
-    meta["turns_launched"] = turn_no
+    meta["turns"] = launch_no
+    # a resume after a dead turn (stalled/failed/killed) replaces that turn's
+    # slot instead of adding one, or the task could never reach done again
+    meta["turns_launched"] = completed + 1
     meta["turn_launched_at"] = now()
     save_meta(tdir, meta)
     backend_bin = locate_backend(backend)
@@ -1138,36 +1283,42 @@ def config_unset(args: argparse.Namespace) -> int:
 def doctor(args: argparse.Namespace) -> int:
     root = state_root(args)
     checks = []
+    codex = BACKENDS["codex"]
+    codex_fix = f"{codex.install_hint} or set {codex.bin_env}"
     try:
-        codex = locate_codex()
-        version = subprocess.run([codex, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-        checks.append({"name": "codex", "ok": version.returncode == 0, "detail": (version.stdout or version.stderr).strip(), "fix": "install Codex CLI or set CDX_CODEX_BIN"})
-        help_result = subprocess.run([codex, "exec", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        codex_bin = locate_backend("codex")
+        version = subprocess.run([codex_bin, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        checks.append({"name": "codex", "ok": version.returncode == 0, "detail": (version.stdout or version.stderr).strip(), "fix": codex_fix})
+        help_result = subprocess.run([codex_bin, "exec", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         checks.append({"name": "codex exec --json", "ok": "--json" in help_result.stdout, "detail": "supported" if "--json" in help_result.stdout else "missing --json", "fix": "upgrade Codex CLI"})
     except CdxError as exc:
-        checks.append({"name": "codex", "ok": False, "detail": exc.message, "fix": "install Codex CLI or set CDX_CODEX_BIN"})
-    try:
-        claude = locate_claude()
-        version = subprocess.run([claude, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-        checks.append(
-            {
-                "name": "claude",
-                "ok": version.returncode == 0,
-                "severity": "pass" if version.returncode == 0 else "warning",
-                "detail": (version.stdout or version.stderr).strip(),
-                "fix": "install Claude Code or set CDX_CLAUDE_BIN",
-            }
-        )
-    except CdxError as exc:
-        checks.append(
-            {
-                "name": "claude",
-                "ok": True,
-                "severity": "warning",
-                "detail": exc.message,
-                "fix": "install Claude Code or set CDX_CLAUDE_BIN",
-            }
-        )
+        checks.append({"name": "codex", "ok": False, "detail": exc.message, "fix": codex_fix})
+    # optional backends: a missing binary is a warning, not a failure
+    for name in ("claude", "grok"):
+        adapter = BACKENDS[name]
+        fix = f"{adapter.install_hint} or set {adapter.bin_env}"
+        try:
+            binpath = locate_binary(adapter.bin_name, adapter.bin_env, adapter.install_hint)
+            version = subprocess.run([binpath, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            checks.append(
+                {
+                    "name": name,
+                    "ok": version.returncode == 0,
+                    "severity": "pass" if version.returncode == 0 else "warning",
+                    "detail": (version.stdout or version.stderr).strip(),
+                    "fix": fix,
+                }
+            )
+        except CdxError as exc:
+            checks.append(
+                {
+                    "name": name,
+                    "ok": True,
+                    "severity": "warning",
+                    "detail": exc.message,
+                    "fix": fix,
+                }
+            )
     try:
         ensure_state(root)
         probe = root / ".write-test"
@@ -1212,7 +1363,7 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("prompt", nargs="?")
     spawn.add_argument("-f", "--file", action="append")
     spawn.add_argument("-C", "--repo", required=True)
-    spawn.add_argument("--backend", choices=["codex", "claude"], default="codex")
+    spawn.add_argument("--backend", choices=list(BACKENDS), default="codex")
     spawn.add_argument("--name")
     spawn.add_argument("--model")
     spawn.add_argument("--effort", default="high")
@@ -1291,7 +1442,7 @@ def build_parser() -> argparse.ArgumentParser:
     helper.add_argument("--prompt-file", required=True)
     helper.add_argument("--mode", choices=["spawn", "resume"], required=True)
     helper.add_argument("--stall-after", type=int, required=True)
-    helper.add_argument("--backend", choices=["codex", "claude"], required=True)
+    helper.add_argument("--backend", choices=list(BACKENDS), required=True)
     helper.add_argument("--backend-bin", required=True)
     helper.set_defaults(func=run_turn)
     return parser

@@ -117,6 +117,108 @@ class StateDerivationTests(TempCase):
                     self.assertEqual(resume[resume.index("--effort") + 1], backend_effort)
 
 
+class GrokBackendTests(TempCase):
+    def grok_meta(self, **overrides):
+        meta = {"backend": "grok", "repo": str(self.base), "model": None, "effort": None}
+        meta.update(overrides)
+        return meta
+
+    def test_grok_spawn_and_resume_cmd_building(self):
+        prompt = self.base / "prompt.md"
+        prompt.write_text("hi", encoding="utf-8")
+        spawn = cdx.backend_cmd(self.grok_meta(model="grok-build", effort="high"), prompt, "spawn", "grok-bin")
+        self.assertEqual(spawn[0], "grok-bin")
+        self.assertEqual(spawn[spawn.index("--prompt-file") + 1], str(prompt))
+        self.assertEqual(spawn[spawn.index("--output-format") + 1], "streaming-json")
+        self.assertEqual(spawn[spawn.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertEqual(spawn[spawn.index("-m") + 1], "grok-build")
+        # cdx "high" maps straight through to grok "high"
+        self.assertEqual(spawn[spawn.index("--reasoning-effort") + 1], "high")
+        self.assertNotIn("--resume", spawn)
+
+        resume = cdx.backend_cmd(self.grok_meta(thread_id="sess-1", effort="max"), prompt, "resume", "grok-bin")
+        self.assertEqual(resume[resume.index("--resume") + 1], "sess-1")
+        self.assertEqual(resume[resume.index("--prompt-file") + 1], str(prompt))
+        # cdx "max" maps to grok "high"
+        self.assertEqual(resume[resume.index("--reasoning-effort") + 1], "high")
+
+    def test_grok_resume_without_thread_id_errors(self):
+        prompt = self.base / "prompt.md"
+        prompt.write_text("hi", encoding="utf-8")
+        with self.assertRaises(cdx.CdxError) as ctx:
+            cdx.backend_cmd(self.grok_meta(), prompt, "resume", "grok-bin")
+        self.assertEqual(ctx.exception.code, 4)
+
+    def test_grok_effort_mapping(self):
+        self.assertEqual(cdx.BACKENDS["grok"].efforts, {"medium": "medium", "high": "high", "max": "high"})
+        self.assertEqual(cdx.backend_effort("grok", "medium"), "medium")
+        self.assertIsNone(cdx.backend_effort("grok", None))
+
+    def test_grok_event_parsing(self):
+        events = [
+            {"type": "thought", "data": "let me "},
+            {"type": "thought", "data": "think"},
+            {"type": "text", "data": "first "},
+            {"type": "text", "data": "answer"},
+            {"type": "end", "stopReason": "EndTurn", "sessionId": "sess-a"},
+            {"type": "text", "data": "PING "},
+            {"type": "text", "data": "reply"},
+            {"type": "end", "stopReason": "EndTurn", "sessionId": "sess-b"},
+        ]
+        # thread_id is the sessionId of the newest end event
+        self.assertEqual(cdx.newest_thread_id(events, "grok"), "sess-b")
+        # turn_count is the number of end events
+        self.assertEqual(cdx.turn_count(events, "grok"), 2)
+        # last_agent_message assembles text deltas of the LAST completed turn only
+        self.assertEqual(cdx.last_agent_message(events, "grok"), "PING reply")
+        # thinking tail concatenates thought deltas from the end
+        self.assertEqual(cdx.BACKENDS["grok"].thinking_tail(self.base, events, 100), "let me think")
+        # mid-run (no end yet): no thread_id, no message
+        mid = [{"type": "thought", "data": "x"}, {"type": "text", "data": "y"}]
+        self.assertIsNone(cdx.newest_thread_id(mid, "grok"))
+        self.assertIsNone(cdx.last_agent_message(mid, "grok"))
+        # error event marks the run failed
+        self.assertTrue(cdx.BACKENDS["grok"].failed([{"type": "error", "message": "boom"}]))
+        self.assertFalse(cdx.BACKENDS["grok"].failed(events))
+
+    def test_grok_state_derivation(self):
+        base_meta = {"backend": "grok", "state": "working", "turns_launched": 1, "turn_launched_at": time.time() - 60}
+        done_events = [
+            {"type": "text", "data": "all "},
+            {"type": "text", "data": "good"},
+            {"type": "end", "stopReason": "EndTurn", "sessionId": "s1"},
+        ]
+        question_events = [
+            {"type": "text", "data": "QUESTION: "},
+            {"type": "text", "data": "which color?"},
+            {"type": "end", "stopReason": "EndTurn", "sessionId": "s2"},
+        ]
+        # a completed turn that also carries an error event is failed
+        failed_events = [
+            {"type": "text", "data": "partial"},
+            {"type": "end", "stopReason": "EndTurn", "sessionId": "s3"},
+            {"type": "error", "message": "model unavailable"},
+        ]
+        error_only = [{"type": "error", "message": "boom"}]
+        self.assertEqual(cdx.derive_state(dict(base_meta), done_events, False), "done")
+        self.assertEqual(cdx.derive_state(dict(base_meta), question_events, False), "awaiting_reply")
+        self.assertEqual(cdx.extract_question(cdx.last_agent_message(question_events, "grok")), "which color?")
+        self.assertEqual(cdx.derive_state(dict(base_meta), failed_events, False), "failed")
+        self.assertEqual(cdx.derive_state(dict(base_meta), error_only, False), "failed")
+
+    def test_registry_derived_choices_and_config_keys(self):
+        # config keys derive from the backend registry, adding model.grok automatically
+        self.assertEqual(cdx.CONFIG_KEYS, {"model.codex", "model.claude", "model.grok"})
+        cdx.require_config_key("model.grok")  # does not raise
+        self.assertEqual(cdx.set_config_key({}, "model.grok", "grok-build"), {"model": {"grok": "grok-build"}})
+        # argparse choices derive from the registry too
+        parser = cdx.build_parser()
+        parsed = parser.parse_args(["spawn", "-C", str(self.base), "--backend", "grok", "hello"])
+        self.assertEqual(parsed.backend, "grok")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["spawn", "-C", str(self.base), "--backend", "nonesuch", "hello"])
+
+
 class TurnAccountingRaceTests(TempCase):
     def write_jsonl(self, path, events):
         with path.open("a", encoding="utf-8") as handle:
@@ -292,14 +394,23 @@ class WatchdogTests(TempCase):
         json.loads(spawn.stdout)
         deadline = time.time() + 90
         last = None
+        stalled = False
         while time.time() < deadline:
             last = self.run_cdx(["status", "--json", "--state-dir", str(state), "stall-test"], env=env)
             data = json.loads(last.stdout)
             if data["state"] == "stalled":
                 self.assertEqual(last.returncode, 12)
-                return
+                stalled = True
+                break
             time.sleep(0.5)
-        self.fail(f"task did not stall; last={last.returncode if last else None} {last.stdout if last else ''} {last.stderr if last else ''}")
+        if not stalled:
+            self.fail(f"task did not stall; last={last.returncode if last else None} {last.stdout if last else ''} {last.stderr if last else ''}")
+        # stalled tasks resume via plain send — no --now gate (SKILL.md: `send "continue"`)
+        send = self.run_cdx(["send", "--json", "--state-dir", str(state), "stall-test", "continue"], env=env)
+        self.assertEqual(send.returncode, 0, send.stderr)
+        result = self.run_cdx(["result", "--json", "--state-dir", str(state), "stall-test", "--wait", "--timeout", "60"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resumed done", json.loads(result.stdout)["message"])
 
 
 class CliSubprocessTests(TempCase):
@@ -611,6 +722,40 @@ class RealBackendSmokeTests(TempCase):
         done, _ = self.poll_state(state, "real-claude", "done", timeout=300)
         self.assertEqual(done.returncode, 0, done.stderr)
         followup_result = self.run_cdx(["result", "--json", "--state-dir", str(state), "real-claude"], timeout=30)
+        self.assertEqual(followup_result.returncode, 0, followup_result.stderr)
+        self.assertIn("FOLLOWUP-OK", json.loads(followup_result.stdout)["message"])
+
+    def test_real_grok_backend_trivial_file_and_resume(self):
+        grok_bin = shutil.which("grok")
+        self.assertIsNotNone(grok_bin, "grok missing; install Grok CLI or set PATH")
+        state = self.base / "state-real-grok"
+        repo = self.base / "real-grok-repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        prompt = "Create hello.txt containing exactly 'hi', verify it, then summarize."
+        spawn = self.run_cdx(
+            ["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "real-grok", "--backend", "grok", "--stall-after", "180", prompt],
+            timeout=30,
+        )
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        spawn_data = json.loads(spawn.stdout)
+        self.assertEqual(spawn_data["backend"], "grok")
+        status, status_data = self.poll_state(state, "real-grok", "done", timeout=300)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status_data["backend"], "grok")
+        self.assertTrue(status_data["thread_id"])
+        self.assertEqual((repo / "hello.txt").read_text(encoding="utf-8").strip(), "hi")
+
+        followup = "Reply with the exact phrase FOLLOWUP-OK and do not edit files."
+        send = self.run_cdx(
+            ["send", "--json", "--state-dir", str(state), "real-grok", "--stall-after", "180", followup],
+            timeout=30,
+        )
+        self.assertEqual(send.returncode, 0, send.stderr)
+        self.assertEqual(json.loads(send.stdout)["backend"], "grok")
+        done, _ = self.poll_state(state, "real-grok", "done", timeout=300)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        followup_result = self.run_cdx(["result", "--json", "--state-dir", str(state), "real-grok"], timeout=30)
         self.assertEqual(followup_result.returncode, 0, followup_result.stderr)
         self.assertIn("FOLLOWUP-OK", json.loads(followup_result.stdout)["message"])
 
