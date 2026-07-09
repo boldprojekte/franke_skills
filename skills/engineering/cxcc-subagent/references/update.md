@@ -7,12 +7,12 @@ version. Run it when the user asks to update the skill. Source of truth:
 ## 1. Locate the installed copy
 
 The installed copy is this skill's own base directory (the folder containing this
-references/ directory) — typically `.claude/skills/cxcc-subagent` or
+references/ directory), typically `.claude/skills/cxcc-subagent` or
 `.agents/skills/cxcc-subagent`.
 
 **Source-checkout case:** if that directory sits inside a git clone of
 `franke_skills` itself (check: `git -C <dir> remote get-url origin` mentions
-`franke_skills`), the update is just `git pull` in that clone — report the pulled
+`franke_skills`), the update is just `git pull` in that clone. Report the pulled
 commits and stop; the steps below are for copied installs only.
 
 ## 2. Fetch the latest version
@@ -32,7 +32,7 @@ diff -r -x __pycache__ <installed-dir> "$SOURCE_DIR"
 ```
 
 - **No differences:** tell the user the skill is already up to date, clean up `$TMP`, stop.
-- **Differences:** summarize them for the user in terms of behavior, not filenames —
+- **Differences:** summarize them for the user in terms of behavior, not filenames.
   `$TMP/repo/CHANGELOG.md` (top entries) is the primary source for "what changed";
   the diff is the ground truth for what will be overwritten.
 

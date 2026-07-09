@@ -1,11 +1,11 @@
 ---
 name: cxcc-subagent
-description: "Spawns, monitors, steers, and collects detached Codex CLI, Claude Code, or Grok coding subagents via the cdx supervisor. Use whenever work is delegated to a subagent — implementation from a frozen spec, refactors, migrations, bug fixes, test writing, read-only codebase exploration, frontend/UI builds, E2E verification of a running app, or two-axis code review — and the session should keep working instead of blocking. Also triggers for: checking whether a delegated run is still alive, answering a question a subagent escalated, redirecting or killing a runaway run, fanning out parallel tasks, or updating this skill."
+description: "Spawns, monitors, steers, and collects detached Codex CLI, Claude Code, or Grok coding subagents via the cdx supervisor. Use whenever work is delegated to a subagent (implementation from a frozen spec, refactors, migrations, bug fixes, test writing, read-only codebase exploration, frontend/UI builds, E2E verification of a running app, or two-axis code review) and the session should keep working instead of blocking. Also triggers for: checking whether a delegated run is still alive, answering a question a subagent escalated, redirecting or killing a runaway run, fanning out parallel tasks, or updating this skill."
 ---
 
 # CXCC Subagent
 
-`cdx` supervises detached `codex exec` sessions. Spawn returns immediately, a watchdog reaps true hangs, and escalated questions surface as an explicit state instead of dying in a log. Division of labour stays as in codex-first: Codex types, you think — spec before, review after.
+`cdx` supervises detached `codex exec` sessions. Spawn returns immediately, a watchdog reaps true hangs, and escalated questions surface as an explicit state instead of dying in a log. Division of labour stays as in codex-first: Codex types, you think. Spec before, review after.
 
 The CLI is `scripts/cdx.py` inside this skill folder; it runs from any cwd and needs only Python 3.10+.
 
@@ -15,7 +15,7 @@ CDX="$SKILL_DIR/scripts/cdx.py"
 ROLES="$SKILL_DIR/references/roles"
 ```
 
-Every verb takes `--json` — use it always; stdout is pure JSON, diagnostics go to stderr. Exact schemas and exit codes: references/spec.md (read only when a field or code is genuinely unclear).
+Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exact schemas and exit codes: references/spec.md (read only when a field or code is genuinely unclear).
 
 ## Roles
 
@@ -25,36 +25,36 @@ A role is a prompt block that frames what kind of agent the task is; `-f` is rep
 python3 $CDX spawn -f $ROLES/general.md -f task.md -C <repo> --json
 ```
 
-Pass role files by path — never read them; they are Codex-facing and cost you nothing. All you need is each role's interface: what your task file must contain.
+Pass role files by path. Never read them; they are Codex-facing and cost you nothing. All you need is each role's interface: what your task file must contain.
 
 | Role file | Use for | Your task file must contain |
 |---|---|---|
-| `roles/general.md` | implementation, refactors, bug fixes, tests — the default for hands-on work | a work order: goal, repo paths, constraints, non-goals, proof expected, output shape |
-| `roles/explore.md` | read-only codebase questions — locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
-| `roles/frontend.md` | UI work — building new interfaces or changing existing ones without producing design slop | the brief/change, greenfield or brownfield, the pages/components that define the surrounding design (brownfield), brand constraints if any, proof expected (build + visual check) |
-| `roles/computer-use.md` | E2E verification by driving the running product — browser flows, app behavior, screenshots, runtime state; user-triggered, not automatic | what was built/changed, the exact flows to drive, how to launch the app, expected behavior per flow, environment bounds (test accounts, what's off-limits) |
+| `roles/general.md` | implementation, refactors, bug fixes, tests: the default for hands-on work | a work order: goal, repo paths, constraints, non-goals, proof expected, output shape |
+| `roles/explore.md` | read-only codebase questions: locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
+| `roles/frontend.md` | UI work: building new interfaces or changing existing ones without producing design slop | the brief/change, greenfield or brownfield, the pages/components that define the surrounding design (brownfield), brand constraints if any, proof expected (build + visual check) |
+| `roles/computer-use.md` | E2E verification by driving the running product: browser flows, app behavior, screenshots, runtime state; user-triggered, not automatic | what was built/changed, the exact flows to drive, how to launch the app, expected behavior per flow, environment bounds (test accounts, what's off-limits) |
 | `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
 
-**Explore tasks:** delegate only questions that would cost you more than a few directed searches; ask them specific and well-scoped, fan out parallel explorers for independent questions, and follow up on the same task via `send`. Trust the ANSWER/EVIDENCE/GAPS report — don't re-run its searches.
+**Explore tasks:** delegate only questions that would cost you more than a few directed searches; ask them specific and well-scoped, fan out parallel explorers for independent questions, and follow up on the same task via `send`. Trust the ANSWER/EVIDENCE/GAPS report. Don't re-run its searches.
 
-**For any code review, read references/review.md first** — it defines the review contract (target, axes, sources — stated to the user before spawning), the target-file format, the parallel two-axis run, and the adjudication step. Don't improvise a review flow when that file exists.
+**For any code review, read references/review.md first.** It defines the review contract (target, axes, and sources, all stated to the user before spawning), the target-file format, the parallel two-axis run, and the adjudication step. Don't improvise a review flow when that file exists.
 
 ## The loop
 
-1. **Spawn.** Write the prompt as a work order — Codex has zero session context: goal, repo + key paths, constraints ("don't touch X"), non-goals, proof expected (exact test command), output shape. Then:
+1. **Spawn.** Write the prompt as a work order. The worker has zero session context, so the work order carries exactly the **delta**: everything the worker needs that is NOT in the codebase. Decisions the user made in this session, constraints you learned, approaches already ruled out, verified facts the worker cannot rediscover. What IS in the codebase gets referenced by path, not repeated as text. And don't write the code in the prompt; you are delegating the typing, not dictating keystrokes. Structure: goal, repo + key paths, constraints ("don't touch X"), non-goals, proof expected (exact test command), output shape. Then:
    ```bash
    python3 $CDX spawn -f prompt.md -C /path/to/repo --json    # returns {task, pid, state} instantly
    ```
-   Done when: JSON came back with a task name. Do not wait here — move on.
+   Done when: JSON came back with a task name. Do not wait here; move on.
 
 2. **Work on something else.** The task runs detached and survives anything short of a reboot.
 
-3. **Check in at natural pauses** — not on a poll loop:
+3. **Check in at natural pauses**, not on a poll loop:
    ```bash
    python3 $CDX list --json    # attention-first: awaiting_reply / failed / stalled sort to the top
    ```
-   Done when: every task is accounted for — `working` tasks left alone, everything else acted on (below).
+   Done when: every task is accounted for: `working` tasks left alone, everything else acted on (below).
 
 4. **Collect and verify.**
    ```bash
@@ -74,14 +74,14 @@ Pass role files by path — never read them; they are Codex-facing and cost you 
 | `stalled` | watchdog killed a hang (no output for 5 min) | `send "continue"` resumes exactly where it stopped |
 | `killed` | you killed it | resumable via `send` |
 
-Answering and steering share one verb — same thread, full context retained:
+Answering and steering share one verb (same thread, full context retained):
 
 ```bash
 python3 $CDX send <task> "Use the existing Zod schema in packages/config" --json   # answer / follow-up
-python3 $CDX send <task> --now "Stop — wrong approach. Refactor X instead" --json  # interrupt a running task first
+python3 $CDX send <task> --now "Stop, wrong approach. Refactor X instead" --json  # interrupt a running task first
 ```
 
-`send` refuses while a task is running; that refusal is the guard against accidental interrupts — reach for `--now` deliberately, when the thinking stream shows a wrong turn, not because you're impatient.
+`send` refuses while a task is running; that refusal is the guard against accidental interrupts. Reach for `--now` deliberately, when the thinking stream shows a wrong turn, not because you're impatient.
 
 ## When unsure what a task is doing
 
@@ -93,28 +93,28 @@ python3 $CDX peek <task> --json              # summarized recent events (command
 python3 $CDX peek <task> --thinking --json   # emergency only: ~1000 chars of live reasoning stream
 ```
 
-`--thinking` is raw model stream and pays its tokens — never poll it. One look, decide, act.
+`--thinking` is raw model stream and pays its tokens. Never poll it. One look, decide, act.
 
 ## Fan-out
 
-Parallel tasks are the point: separate repos (or non-overlapping dirs), one spawn each, one `list` to watch them all. Two tasks writing the same checkout will trample each other — cdx warns on spawn; take the warning seriously.
+Parallel tasks are the point: separate repos (or non-overlapping dirs), one spawn each, one `list` to watch them all. Two tasks writing the same checkout will trample each other, so cdx warns on spawn; take the warning seriously.
 
 ## Backends, models, effort
 
-`spawn --backend codex|claude|grok` (default codex) — identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is a per-task choice; cdx translates to each backend's own scale. Pick by task shape along cost / taste / intelligence — these are defaults with reasons, deviate when the task tells you to:
+`spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is a per-task choice; cdx translates to each backend's own scale. Pick by task shape along cost / taste / intelligence. These are defaults with reasons; deviate when the task tells you to:
 
 | Task shape | Default | Why |
 |---|---|---|
-| taste-heavy: prose, frontend/UI, API design — anything that must *feel* right | claude / opus / high | taste — Anthropic models have the strongest judgment for language and aesthetics |
+| taste-heavy: prose, frontend/UI, API design, anything that must *feel* right | claude / opus / high | taste: Anthropic models have the strongest judgment for language and aesthetics |
 | general coding: features, refactors, bug fixes, tests | codex / gpt-5.5 / high (grok as the equal-footing budget alternative) | intelligence per cost for the workhorse |
 | explore + mechanical work: codebase questions, migrations, format churn | codex / gpt-5.5 / medium (or claude / sonnet / medium) | cost and speed; the intelligence bar is low |
 | review | high effort, a **different model than the one that built** | cross-review catches what self-image misses |
-| computer-use / E2E verification | codex / gpt-5.5 / high — **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference |
+| computer-use / E2E verification | codex / gpt-5.5 / high, **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference |
 
-`--model` overrides a single task; machine-level defaults live in `cdx config` (self-describing via `--help`) — touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
+`--model` overrides a single task; machine-level defaults live in `cdx config` (self-describing via `--help`); touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
 
 ## Housekeeping
 
-`python3 $CDX doctor` before first use of a session if anything smells off (binary, state dir, orphans). `python3 $CDX clean --terminal` once results are harvested — a lean task list keeps `list` readable.
+`python3 $CDX doctor` before first use of a session if anything smells off (binary, state dir, orphans). `python3 $CDX clean --terminal` once results are harvested: a lean task list keeps `list` readable.
 
-When the user asks to update this skill, read references/update.md and follow it — it fetches the latest published version, shows the user what changed, and applies it safely.
+When the user asks to update this skill, read references/update.md and follow it: it fetches the latest published version, shows the user what changed, and applies it safely.
