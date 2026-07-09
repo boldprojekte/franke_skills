@@ -116,3 +116,17 @@ Peter Steinberger's [codex-first](https://github.com/steipete/agent-scripts) ski
 ## License
 
 MIT
+
+## Usage: `list_skills.py`
+
+`scripts/list_skills.py` scans `skills/` recursively for `SKILL.md` files and reads the `name` and `description` from each skill's YAML frontmatter. Stdlib-only; needs Python 3.10+ and runs from any cwd.
+
+```bash
+# JSON array of {category, name, description} to stdout
+python3 scripts/list_skills.py
+
+# the same data as a markdown table
+python3 scripts/list_skills.py --markdown
+```
+
+`category` is the folder directly under `skills/` (e.g. `engineering`).
