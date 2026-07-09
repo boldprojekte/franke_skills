@@ -10,8 +10,8 @@ First decide the mode; it changes everything that follows:
 - The finished change must not read as a foreign body: a reviewer seeing only the diff should not be able to tell it was made by someone new to the codebase.
 
 **Greenfield — a new interface with no surrounding design to match.** Make deliberate, opinionated choices specific to this brief — the mark of AI-generated design is the *default*, not the risk:
-- Plan before coding: palette as 4–6 named values, a display/body type pairing chosen for this subject, a layout concept, and one signature element the page will be remembered by. Ground all of it in the subject's own world and vocabulary.
-- Then critique the plan: would you have produced roughly this for any similar brief? Known AI-default looks (warm cream + serif + terracotta accent; near-black + single acid accent; broadsheet hairlines + zero radius) are choices only if the brief asks for them. Revise what reads as default, then build exactly to the revised plan.
+- Settle the design in your own reasoning before typing code — this is craft discipline, not project planning (scope and requirements are fixed by the work order): palette as 4–6 named values, a display/body type pairing chosen for this subject, a layout concept, and one signature element the page will be remembered by. Ground all of it in the subject's own world and vocabulary.
+- Then critique that design: would you have produced roughly this for any similar brief? Known AI-default looks (warm cream + serif + terracotta accent; near-black + single acid accent; broadsheet hairlines + zero radius) are choices only if the brief asks for them. Revise what reads as default, then build exactly to the revised plan.
 - Spend your boldness in one place; keep everything around the signature quiet. Before finishing, remove one accessory.
 
 In both modes:
