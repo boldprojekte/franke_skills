@@ -1,6 +1,6 @@
 ---
 name: cxcc-subagent
-description: "Spawns, monitors, steers, and collects parallel Codex CLI or Claude Code coding tasks via the cdx supervisor. Use whenever implementation work is delegated to subagents — building from a frozen spec, refactors, mechanical migrations, bug fixes, test writing — and the session should keep working instead of blocking on codex exec. Also triggers for: checking whether a delegated run is still alive, answering a question a subagent escalated, redirecting or killing a runaway run, or fanning out several coding tasks in parallel."
+description: "Spawns, monitors, steers, and collects detached Codex CLI, Claude Code, or Grok coding subagents via the cdx supervisor. Use whenever work is delegated to a subagent — implementation from a frozen spec, refactors, migrations, bug fixes, test writing, read-only codebase exploration, frontend/UI builds, E2E verification of a running app, or two-axis code review — and the session should keep working instead of blocking. Also triggers for: checking whether a delegated run is still alive, answering a question a subagent escalated, redirecting or killing a runaway run, fanning out parallel tasks, or updating this skill."
 ---
 
 # CXCC Subagent
@@ -36,7 +36,7 @@ Pass role files by path — never read them; they are Codex-facing and cost you 
 | `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
 
-**Explore tasks:** delegate only questions that would take you more than a few directed searches — for a single lookup, search yourself. Ask specific, well-scoped questions; fan out parallel explorers with distinct focuses for independent questions; send follow-ups on a related question to the same task via `send` instead of respawning. Trust the returned ANSWER/EVIDENCE/GAPS report — don't re-run its searches; the EVIDENCE `file:line` anchors are for jumping into code, the GAPS section is the honest bound of the answer.
+**Explore tasks:** delegate only questions that would cost you more than a few directed searches; ask them specific and well-scoped, fan out parallel explorers for independent questions, and follow up on the same task via `send`. Trust the ANSWER/EVIDENCE/GAPS report — don't re-run its searches.
 
 **For any code review, read references/review.md first** — it defines the review contract (target, axes, sources — stated to the user before spawning), the target-file format, the parallel two-axis run, and the adjudication step. Don't improvise a review flow when that file exists.
 
