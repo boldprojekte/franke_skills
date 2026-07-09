@@ -31,10 +31,11 @@ Pass role files by path — never read them; they are Codex-facing and cost you 
 |---|---|---|
 | `roles/general.md` | implementation, refactors, bug fixes, tests — the default for hands-on work | a work order: goal, repo paths, constraints, non-goals, proof expected, output shape |
 | `roles/explore.md` | read-only codebase questions — locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
+| `roles/frontend.md` | UI work — building new interfaces or changing existing ones without producing design slop | the brief/change, greenfield or brownfield, the pages/components that define the surrounding design (brownfield), brand constraints if any, proof expected (build + visual check) |
 | `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
 
-**Explore tasks:** delegate only questions that would take you more than a few directed searches — for a single lookup, search yourself. Ask specific, well-scoped questions; fan out parallel explorers with distinct focuses for independent questions; send follow-ups on a related question to the same task via `send` instead of respawning. Trust the returned ANSWER/EVIDENCE/GAPS report — don't re-run its searches; the EVIDENCE `file:line` anchors are for jumping into code, the GAPS section is the honest bound of the answer. Explore is a cheap-and-fast role: spawn it with `--backend codex --model gpt-5.5 --effort medium` unless the question is genuinely hard.
+**Explore tasks:** delegate only questions that would take you more than a few directed searches — for a single lookup, search yourself. Ask specific, well-scoped questions; fan out parallel explorers with distinct focuses for independent questions; send follow-ups on a related question to the same task via `send` instead of respawning. Trust the returned ANSWER/EVIDENCE/GAPS report — don't re-run its searches; the EVIDENCE `file:line` anchors are for jumping into code, the GAPS section is the honest bound of the answer.
 
 **For any code review, read references/review.md first** — it defines the review contract (target, axes, sources — stated to the user before spawning), the target-file format, the parallel two-axis run, and the adjudication step. Don't improvise a review flow when that file exists.
 
@@ -99,7 +100,16 @@ Parallel tasks are the point: separate repos (or non-overlapping dirs), one spaw
 
 ## Backends, models, effort
 
-`spawn --backend codex|claude|grok` (default codex) — identical verbs, states, and roles across all three; pick claude when the task benefits from a Claude model, grok for an xAI Grok model, codex otherwise. `--effort medium|high|max` (default high) is a per-task choice — medium for mechanical work, max for the hardest problems; cdx translates to each backend's own scale. Model defaults are machine-level policy, not per-spawn knowledge: they live in `cdx config` (self-describing via `--help`) — touch it only when the user asks to change models; `--model` overrides a single task. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
+`spawn --backend codex|claude|grok` (default codex) — identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is a per-task choice; cdx translates to each backend's own scale. Pick by task shape along cost / taste / intelligence — these are defaults with reasons, deviate when the task tells you to:
+
+| Task shape | Default | Why |
+|---|---|---|
+| taste-heavy: prose, frontend/UI, API design — anything that must *feel* right | claude / opus / high | taste — Anthropic models have the strongest judgment for language and aesthetics |
+| general coding: features, refactors, bug fixes, tests | codex / gpt-5.5 / high (grok as the equal-footing budget alternative) | intelligence per cost for the workhorse |
+| explore + mechanical work: codebase questions, migrations, format churn | codex / gpt-5.5 / medium (or claude / sonnet / medium) | cost and speed; the intelligence bar is low |
+| review | high effort, a **different model than the one that built** | cross-review catches what self-image misses |
+
+`--model` overrides a single task; machine-level defaults live in `cdx config` (self-describing via `--help`) — touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
 
 ## Housekeeping
 
