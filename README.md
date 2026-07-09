@@ -88,7 +88,7 @@ Platform support:
 .claude-plugin/plugin.json
 skills/engineering/cxcc-subagent/
   SKILL.md
-  references/            # spec, review contract, role prompts
+  references/            # review contract, role prompts
   scripts/cdx.py         # the supervisor CLI
   scripts/tests/         # fast unit suite
 ```
