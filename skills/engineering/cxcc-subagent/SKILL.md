@@ -32,6 +32,7 @@ Pass role files by path — never read them; they are Codex-facing and cost you 
 | `roles/general.md` | implementation, refactors, bug fixes, tests — the default for hands-on work | a work order: goal, repo paths, constraints, non-goals, proof expected, output shape |
 | `roles/explore.md` | read-only codebase questions — locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
 | `roles/frontend.md` | UI work — building new interfaces or changing existing ones without producing design slop | the brief/change, greenfield or brownfield, the pages/components that define the surrounding design (brownfield), brand constraints if any, proof expected (build + visual check) |
+| `roles/computer-use.md` | E2E verification by driving the running product — browser flows, app behavior, screenshots, runtime state; user-triggered, not automatic | what was built/changed, the exact flows to drive, how to launch the app, expected behavior per flow, environment bounds (test accounts, what's off-limits) |
 | `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
 
@@ -108,6 +109,7 @@ Parallel tasks are the point: separate repos (or non-overlapping dirs), one spaw
 | general coding: features, refactors, bug fixes, tests | codex / gpt-5.5 / high (grok as the equal-footing budget alternative) | intelligence per cost for the workhorse |
 | explore + mechanical work: codebase questions, migrations, format churn | codex / gpt-5.5 / medium (or claude / sonnet / medium) | cost and speed; the intelligence bar is low |
 | review | high effort, a **different model than the one that built** | cross-review catches what self-image misses |
+| computer-use / E2E verification | codex / gpt-5.5 / high — **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference |
 
 `--model` overrides a single task; machine-level defaults live in `cdx config` (self-describing via `--help`) — touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
 

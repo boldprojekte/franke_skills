@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `roles/computer-use.md`: an E2E verification role that drives the running product (browser flows, screenshots, runtime state) and reports VERDICT/STEPS/OBSERVED-vs-EXPECTED per flow; pinned to the codex backend (gpt-5.5), whose harness is strongest at computer use.
 - Add `roles/frontend.md`: a frontend role with a brownfield/greenfield gate — brownfield treats the surrounding design as the spec (no foreign bodies), greenfield distills Anthropic's frontend-design guidance (deliberate choices, one signature element, no AI-default looks); both enforce "everything earns its place".
 - Add a model-selection table to SKILL.md: per-task-shape defaults with reasons along cost / taste / intelligence (taste-heavy → claude/opus, general coding → gpt-5.5 or grok, explore/mechanical → gpt-5.5 medium, review → cross-model at high effort).
 - Make `cxcc-subagent` path examples install-location agnostic by anchoring them to the skill's announced base directory.
