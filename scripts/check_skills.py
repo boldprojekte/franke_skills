@@ -89,10 +89,9 @@ def check_skill_file(path: Path) -> list[str]:
     return problems
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
-    skills_dir = Path(argv[0]) if argv else repo_root / "skills"
+    skills_dir = repo_root / "skills"
 
     if not skills_dir.is_dir():
         print(f"error: skills directory not found: {skills_dir}", file=sys.stderr)
