@@ -15,7 +15,7 @@ CDX="$SKILL_DIR/scripts/cdx.py"
 ROLES="$SKILL_DIR/references/roles"
 ```
 
-Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exact schemas and exit codes: references/spec.md (read only when a field or code is genuinely unclear).
+Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exit codes: 0 ok · 2 usage · 3 not found · 4 invalid state · 5 backend/internal · 6 timeout · 7 binary missing · 10 working · 11 awaiting_reply · 12 stalled · 13 failed/killed. If a JSON field is genuinely unclear, the source of truth is `scripts/cdx.py`.
 
 ## Roles
 
