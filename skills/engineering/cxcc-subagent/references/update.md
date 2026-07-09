@@ -2,8 +2,7 @@
 
 Procedure for updating an installed copy of `cxcc-subagent` to the latest published
 version. Run it when the user asks to update the skill. Source of truth:
-`https://github.com/boldprojekte/franke_skills` (branch `main`, skill at
-`skills/engineering/cxcc-subagent/`).
+`https://github.com/boldprojekte/franke_skills` (branch `main`).
 
 ## 1. Locate the installed copy
 
@@ -21,14 +20,15 @@ commits and stop; the steps below are for copied installs only.
 ```bash
 TMP=$(mktemp -d)
 git clone --depth 1 https://github.com/boldprojekte/franke_skills.git "$TMP/repo"
+SOURCE_DIR=$(find "$TMP/repo/skills" -path '*/cxcc-subagent' -type d | head -n 1)
 ```
 
-Done when: the clone exists and `$TMP/repo/skills/engineering/cxcc-subagent/` is present.
+Done when: the clone exists and `$SOURCE_DIR` is the fetched `cxcc-subagent` skill directory.
 
 ## 3. Diff before touching anything
 
 ```bash
-diff -r -x __pycache__ <installed-dir> "$TMP/repo/skills/engineering/cxcc-subagent"
+diff -r -x __pycache__ <installed-dir> "$SOURCE_DIR"
 ```
 
 - **No differences:** tell the user the skill is already up to date, clean up `$TMP`, stop.

@@ -7,11 +7,12 @@ description: "Spawns, monitors, steers, and collects parallel Codex CLI or Claud
 
 `cdx` supervises detached `codex exec` sessions. Spawn returns immediately, a watchdog reaps true hangs, and escalated questions surface as an explicit state instead of dying in a log. Division of labour stays as in codex-first: Codex types, you think — spec before, review after.
 
-The CLI is `scripts/cdx.py` inside this skill folder (in this repo: `skills/engineering/cxcc-subagent/scripts/cdx.py`); it runs from any cwd and needs only Python 3.10+.
+The CLI is `scripts/cdx.py` inside this skill folder; it runs from any cwd and needs only Python 3.10+.
 
 ```bash
-CDX="skills/engineering/cxcc-subagent/scripts/cdx.py"        # then: python3 $CDX <verb> ...
-ROLES="skills/engineering/cxcc-subagent/references/roles"
+SKILL_DIR=<this skill's base directory, announced when the skill loads>
+CDX="$SKILL_DIR/scripts/cdx.py"
+ROLES="$SKILL_DIR/references/roles"
 ```
 
 Every verb takes `--json` — use it always; stdout is pure JSON, diagnostics go to stderr. Exact schemas and exit codes: references/spec.md (read only when a field or code is genuinely unclear).

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Make `cxcc-subagent` path examples install-location agnostic by anchoring them to the skill's announced base directory.
 - Add Grok Build CLI (`grok`) as a third `cdx` backend alongside codex and claude: `spawn --backend grok`, resume, and config key `model.grok`. Backend selection is now a per-backend adapter registry.
 - Add `roles/explore.md`: a read-only exploration role with a fixed ANSWER/EVIDENCE/GAPS report contract, modeled on the explore-agent designs of Claude Code and Codex.
 - Add references/update.md: self-update procedure — on request, the agent fetches the latest published skill version, reports what changed, and applies it.
