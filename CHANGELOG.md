@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (2026-07-09)
+
+- Keep the agent-facing effort vocabulary at `medium | high | max`, but route automatic Codex work deterministically: medium to GPT-5.6 Terra/high, high to GPT-5.6 Sol/high, and max to GPT-5.6 Sol/xhigh.
+- Add model-aware Fable 5 effort translation (medium to low, high to medium, max to xhigh) and make Fable explicitly user-directed only in the skill policy.
+- Report `model`, cdx `effort`, and resolved `provider_effort` in spawn, list, status, result, and send JSON so model routing is auditable.
+- Keep SKILL.md agent-first: the orchestrator sees only backend/effort per task shape; the concrete Terra/Sol and Fable routing tables live in the README and the `--effort` CLI help, not in agent context.
+- Make cross-provider review explicit: claude/opus reviews codex-built changes, codex/high reviews claude- or grok-built changes; Sonnet remains an exploration option.
+
 ## 0.2.1 (2026-07-09)
 
 - SKILL.md: while multiple tasks are in flight, the agent shows a compact plan table (task + goal, backend/model/effort, status) after spawning and at each check-in; a single task gets a sentence instead.

@@ -116,6 +116,49 @@ class StateDerivationTests(TempCase):
                     self.assertEqual(spawn[spawn.index("--effort") + 1], backend_effort)
                     self.assertEqual(resume[resume.index("--effort") + 1], backend_effort)
 
+    def test_codex_auto_routes_choose_model_and_provider_effort(self):
+        repo = self.base / "repo-auto-routes"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        prompt = self.base / "auto-routes.md"
+        prompt.write_text("hi", encoding="utf-8")
+        routes = {
+            "medium": ("gpt-5.6-terra", "high"),
+            "high": ("gpt-5.6-sol", "high"),
+            "max": ("gpt-5.6-sol", "xhigh"),
+        }
+        for cdx_effort, (model, provider_effort) in routes.items():
+            self.assertEqual(cdx.resolve_execution("codex", cdx_effort, None), (model, provider_effort))
+            meta = {
+                "backend": "codex",
+                "repo": str(repo),
+                "model": model,
+                "effort": cdx_effort,
+                "provider_effort": provider_effort,
+            }
+            command = cdx.backend_cmd(meta, prompt, "spawn", "codex-bin")
+            self.assertEqual(command[command.index("-m") + 1], model)
+            self.assertIn(f'model_reasoning_effort="{provider_effort}"', command)
+
+    def test_explicit_codex_model_keeps_generic_effort_mapping(self):
+        self.assertEqual(cdx.resolve_execution("codex", "medium", "gpt-test"), ("gpt-test", "medium"))
+        self.assertEqual(cdx.resolve_execution("codex", "max", "gpt-test"), ("gpt-test", "xhigh"))
+
+    def test_fable_has_model_specific_effort_mapping(self):
+        expected = {"medium": "low", "high": "medium", "max": "xhigh"}
+        for model in ("fable", "claude-fable-5", "claude-fable-5-20260701"):
+            for cdx_effort, provider_effort in expected.items():
+                self.assertEqual(cdx.resolve_execution("claude", cdx_effort, model), (model, provider_effort))
+        self.assertEqual(cdx.resolve_execution("claude", "high", "sonnet"), ("sonnet", "xhigh"))
+
+    def test_stored_provider_effort_is_authoritative(self):
+        meta = {"backend": "codex", "model": "gpt-5.6-sol", "effort": "max", "provider_effort": "high"}
+        self.assertEqual(cdx.resolved_provider_effort(meta), "high")
+
+    def test_legacy_task_without_provider_effort_keeps_old_translation(self):
+        meta = {"backend": "codex", "model": None, "effort": "medium"}
+        self.assertEqual(cdx.resolved_provider_effort(meta), "medium")
+
 
 class GrokBackendTests(TempCase):
     def grok_meta(self, **overrides):
@@ -446,7 +489,10 @@ class CliSubprocessTests(TempCase):
 
         spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "cli-task", "hello"], env=env)
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
-        self.assert_json_stdout(spawn)
+        spawn_data = self.assert_json_stdout(spawn)
+        self.assertEqual(spawn_data["model"], "gpt-5.6-sol")
+        self.assertEqual(spawn_data["effort"], "high")
+        self.assertEqual(spawn_data["provider_effort"], "high")
 
         deadline = time.time() + 10
         status = None
@@ -458,10 +504,15 @@ class CliSubprocessTests(TempCase):
             time.sleep(0.2)
         self.assertIsNotNone(status)
         self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(data["model"], "gpt-5.6-sol")
+        self.assertEqual(data["provider_effort"], "high")
 
         listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
         self.assertEqual(listing.returncode, 0, listing.stderr)
-        self.assertIsInstance(self.assert_json_stdout(listing), list)
+        listing_data = self.assert_json_stdout(listing)
+        self.assertIsInstance(listing_data, list)
+        self.assertEqual(listing_data[0]["model"], "gpt-5.6-sol")
+        self.assertEqual(listing_data[0]["provider_effort"], "high")
 
         peek = self.run_cdx(["peek", "--json", "--state-dir", str(state), "cli-task"], env=env)
         self.assertEqual(peek.returncode, 0, peek.stderr)
@@ -469,7 +520,10 @@ class CliSubprocessTests(TempCase):
 
         result = self.run_cdx(["result", "--json", "--state-dir", str(state), "cli-task"], env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.assert_json_stdout(result)["message"], "fake done")
+        result_data = self.assert_json_stdout(result)
+        self.assertEqual(result_data["message"], "fake done")
+        self.assertEqual(result_data["model"], "gpt-5.6-sol")
+        self.assertEqual(result_data["provider_effort"], "high")
 
         send = self.run_cdx(["send", "--json", "--state-dir", str(state), "cli-task", "continue"], env=env)
         self.assertEqual(send.returncode, 0, send.stderr)
@@ -529,7 +583,20 @@ class CliSubprocessTests(TempCase):
         other.mkdir()
         result = self.run_cdx(["spawn", "--json", "--state-dir", str(self.base / "state"), "-C", str(self.base), "--effort", "xhigh", "hello"])
         self.assertEqual(result.returncode, 2)
-        self.assertIn("medium, high, max", result.stderr)
+        # argparse quotes choices on 3.10/3.11 but not on 3.12+, so match each
+        # choice individually instead of the joined list.
+        self.assertIn("invalid choice", result.stderr)
+        for choice in ("medium", "high", "max"):
+            self.assertIn(choice, result.stderr)
+
+    def test_spawn_help_explains_codex_and_fable_translation(self):
+        other = self.base / "other"
+        other.mkdir()
+        result = self.run_cdx(["spawn", "--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("medium=Terra/high", result.stdout)
+        self.assertIn("Fable override", result.stdout)
+        self.assertIn("medium=low", result.stdout)
 
     def test_config_get_set_unset_round_trip(self):
         other = self.base / "other"
@@ -595,8 +662,12 @@ class CliSubprocessTests(TempCase):
             env=env,
         )
         self.assertEqual(unset_model.returncode, 0, unset_model.stderr)
-        self.assertIsNone(json.loads(unset_model.stdout)["model"])
-        self.assertIsNone(cdx.load_meta(state / "tasks" / "model-unset")["model"])
+        unset_data = json.loads(unset_model.stdout)
+        self.assertEqual(unset_data["model"], "gpt-5.6-sol")
+        self.assertEqual(unset_data["provider_effort"], "high")
+        unset_meta = cdx.load_meta(state / "tasks" / "model-unset")
+        self.assertEqual(unset_meta["model"], "gpt-5.6-sol")
+        self.assertEqual(unset_meta["provider_effort"], "high")
 
 
 class RealBackendSmokeTests(TempCase):

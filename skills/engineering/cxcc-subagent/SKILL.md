@@ -103,15 +103,19 @@ Keep the user oriented while tasks are in flight. With more than one task, show 
 
 ## Backends, models, effort
 
-`spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is a per-task choice; cdx translates to each backend's own scale. Pick by task shape along cost / taste / intelligence. These are defaults with reasons; deviate when the task tells you to:
+`spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is the per-task power dial; cdx resolves it to each backend's current model and reasoning settings. Never pick provider model names or raw reasoning levels for codex yourself — that translation is cdx's job. If the user asks what actually ran, the JSON output of every verb reports the resolved `model` and `provider_effort`.
+
+**Fable is user-directed only.** Never select `fable` or `claude-fable-5` from task shape, cost, taste, or review heuristics; as a subagent it is normally too expensive. Spawn it only when the user explicitly asks for Fable (`--backend claude --model fable`); effort translation is handled by cdx as usual.
+
+Pick by task shape along cost / taste / intelligence. These are defaults with reasons; deviate when the task tells you to:
 
 | Task shape | Default | Why |
 |---|---|---|
 | taste-heavy: prose, frontend/UI, API design, anything that must *feel* right | claude / opus / high | taste: Anthropic models have the strongest judgment for language and aesthetics |
-| general coding: features, refactors, bug fixes, tests | codex / gpt-5.5 / high (grok as the equal-footing budget alternative) | intelligence per cost for the workhorse |
-| explore + mechanical work: codebase questions, migrations, format churn | codex / gpt-5.5 / medium (or claude / sonnet / medium) | cost and speed; the intelligence bar is low |
-| review | high effort, a **different model than the one that built** | cross-review catches what self-image misses |
-| computer-use / E2E verification | codex / gpt-5.5 / high, **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference |
+| general coding: features, refactors, bug fixes, tests | codex / high, with grok as the equal-footing budget alternative | intelligence per cost for the workhorse |
+| explore + mechanical work: codebase questions, migrations, format churn | codex / medium, or claude / sonnet / medium | cost and speed; the intelligence bar is lower |
+| review | high effort with a **different provider than the one that built**: claude / opus when codex built; codex / high when claude or grok built | cross-review catches what self-image misses; Sonnet is for exploration, not the default reviewer |
+| computer-use / E2E verification | codex / high, **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference |
 
 `--model` overrides a single task; machine-level defaults live in `cdx config` (self-describing via `--help`); touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
 

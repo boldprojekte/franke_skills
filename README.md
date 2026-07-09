@@ -62,6 +62,18 @@ Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answer
 
 When using the source checkout directly, replace `.agents/skills/cxcc-subagent` with `skills/engineering/cxcc-subagent`.
 
+### Three stable effort tiers
+
+Agents choose only `medium`, `high`, or `max`. `cdx` translates that stable vocabulary to the provider's current model and reasoning controls:
+
+| `cdx --effort` | Automatic Codex execution |
+|---|---|
+| `medium` | GPT-5.6 Terra at high reasoning |
+| `high` | GPT-5.6 Sol at high reasoning |
+| `max` | GPT-5.6 Sol at xhigh reasoning |
+
+Fable 5 is never selected automatically. It is available only through an explicit user-directed model override and gets its own effort translation (`medium → low`, `high → medium`, `max → xhigh`) to keep subagent cost in check. JSON responses report the public effort, resolved model, and provider effort separately.
+
 ## Skills
 
 ### `cxcc-subagent`

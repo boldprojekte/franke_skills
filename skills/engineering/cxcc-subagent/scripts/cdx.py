@@ -17,12 +17,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
 TURN_STARTUP_GRACE_S = 15
 CDX_EFFORTS = ("medium", "high", "max")
+CODEX_AUTO_ROUTES = {
+    "medium": ("gpt-5.6-terra", "high"),
+    "high": ("gpt-5.6-sol", "high"),
+    "max": ("gpt-5.6-sol", "xhigh"),
+}
+FABLE_EFFORTS = {"medium": "low", "high": "medium", "max": "xhigh"}
 SPAWN_PREAMBLE = """[orchestration protocol] You are run non-interactively by an orchestrating
 agent. If you hit a decision you cannot make yourself (missing access,
 ambiguous requirement, a destructive or irreversible choice), do not guess:
@@ -53,7 +59,7 @@ class CodexBackend:
 
     def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
         model = meta.get("model")
-        effort = backend_effort(self.name, meta.get("effort"))
+        effort = resolved_provider_effort(meta)
         if mode == "spawn":
             repo = Path(str(meta["repo"]))
             cmd = [backend_bin, "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "-C", str(repo)]
@@ -162,7 +168,7 @@ class ClaudeBackend:
 
     def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
         model = meta.get("model")
-        effort = backend_effort(self.name, meta.get("effort"))
+        effort = resolved_provider_effort(meta)
         if mode == "spawn":
             cmd = [backend_bin, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--dangerously-skip-permissions"]
         else:
@@ -248,7 +254,7 @@ class GrokBackend:
 
     def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
         model = meta.get("model")
-        effort = backend_effort(self.name, meta.get("effort"))
+        effort = resolved_provider_effort(meta)
         if mode == "spawn":
             cmd = [backend_bin, "--prompt-file", str(prompt_file), "--output-format", "streaming-json", "--permission-mode", "bypassPermissions"]
         else:
@@ -435,6 +441,47 @@ def backend_effort(backend: str, effort: str | None) -> str | None:
         return None
     validate_effort(effort)
     return BACKENDS[backend].efforts[effort]
+
+
+def is_fable_model(model: str | None) -> bool:
+    if not model:
+        return False
+    value = model.lower()
+    return value == "fable" or value == "claude-fable-5" or value.startswith("claude-fable-5-")
+
+
+def resolve_execution(backend: str, effort: str, model: str | None) -> tuple[str | None, str]:
+    """Resolve cdx's stable effort vocabulary to a concrete provider execution."""
+    validate_effort(effort)
+    if backend == "codex" and model is None:
+        return CODEX_AUTO_ROUTES[effort]
+    if backend == "claude" and is_fable_model(model):
+        return model, FABLE_EFFORTS[effort]
+    provider_effort = backend_effort(backend, effort)
+    assert provider_effort is not None
+    return model, provider_effort
+
+
+def resolved_provider_effort(meta: dict[str, Any]) -> str | None:
+    value = meta.get("provider_effort")
+    if isinstance(value, str) and value:
+        return value
+    backend = meta_backend(meta)
+    effort = meta.get("effort")
+    if not isinstance(effort, str):
+        return None
+    # Legacy tasks predate stored provider resolution. Keep their original
+    # backend-only translation on resume instead of silently changing model
+    # semantics after a skill update.
+    return backend_effort(backend, effort)
+
+
+def execution_fields(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": meta.get("model"),
+        "effort": meta.get("effort"),
+        "provider_effort": resolved_provider_effort(meta),
+    }
 
 
 def load_config(root: Path) -> dict[str, Any]:
@@ -743,6 +790,7 @@ def status_payload(name: str, tdir: Path) -> dict[str, Any]:
     payload = {
         "task": name,
         "backend": backend,
+        **execution_fields(meta),
         "state": state,
         "repo": meta.get("repo"),
         "age_s": max(0, int(now() - spawned)),
@@ -771,7 +819,22 @@ def status_payload(name: str, tdir: Path) -> dict[str, Any]:
 
 def list_payload(name: str, tdir: Path) -> dict[str, Any]:
     detail = status_payload(name, tdir)
-    return {key: detail[key] for key in ("task", "backend", "state", "repo", "age_s", "last_output_age_s", "last_activity", "question")}
+    return {
+        key: detail[key]
+        for key in (
+            "task",
+            "backend",
+            "model",
+            "effort",
+            "provider_effort",
+            "state",
+            "repo",
+            "age_s",
+            "last_output_age_s",
+            "last_activity",
+            "question",
+        )
+    }
 
 
 def condense(text: str, limit: int = 80) -> str:
@@ -855,7 +918,8 @@ def spawn_task(args: argparse.Namespace) -> int:
     ensure_state(root)
     backend = args.backend
     validate_effort(args.effort)
-    model = args.model if args.model is not None else configured_model(root, backend)
+    requested_model = args.model if args.model is not None else configured_model(root, backend)
+    model, provider_effort = resolve_execution(backend, args.effort, requested_model)
     repo = Path(args.repo).expanduser().resolve()
     if not repo.exists() or not repo.is_dir():
         raise CdxError(2, f"repo does not exist or is not a directory: {repo}; pass a valid -C/--repo")
@@ -884,6 +948,7 @@ def spawn_task(args: argparse.Namespace) -> int:
         "spawned_at": now(),
         "model": model,
         "effort": args.effort,
+        "provider_effort": provider_effort,
         "state": "working",
         "turns": 1,
         "turns_launched": 1,
@@ -898,7 +963,14 @@ def spawn_task(args: argparse.Namespace) -> int:
     if not meta.get("pid"):
         meta["pid"] = pid
         save_meta(tdir, meta)
-    payload = {"task": name, "backend": backend, "repo": str(repo), "pid": meta.get("pid"), "state": "working", "model": model, "effort": args.effort}
+    payload = {
+        "task": name,
+        "backend": backend,
+        "repo": str(repo),
+        "pid": meta.get("pid"),
+        "state": "working",
+        **execution_fields(meta),
+    }
     emit(args, payload, f"{name} working pid={payload['pid']} repo={repo}")
     return 0
 
@@ -1164,6 +1236,7 @@ def result_task(args: argparse.Namespace) -> int:
     data = {
         "task": name,
         "backend": backend,
+        **execution_fields(meta),
         "state": payload["state"],
         "message": message,
         "question": extract_question(message),
@@ -1204,7 +1277,14 @@ def send_task(args: argparse.Namespace) -> int:
     backend_bin = locate_backend(backend)
     pid = launch_helper(root, name, prompt_path, "resume", args.stall_after, backend, backend_bin)
     meta = load_meta(tdir)
-    data = {"task": name, "backend": backend, "repo": meta.get("repo"), "pid": meta.get("pid") or pid, "state": "working", "model": meta.get("model"), "effort": meta.get("effort")}
+    data = {
+        "task": name,
+        "backend": backend,
+        "repo": meta.get("repo"),
+        "pid": meta.get("pid") or pid,
+        "state": "working",
+        **execution_fields(meta),
+    }
     emit(args, data, f"{name} working pid={data['pid']} repo={data['repo']}")
     return 0
 
@@ -1365,8 +1445,16 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("-C", "--repo", required=True)
     spawn.add_argument("--backend", choices=list(BACKENDS), default="codex")
     spawn.add_argument("--name")
-    spawn.add_argument("--model")
-    spawn.add_argument("--effort", default="high")
+    spawn.add_argument("--model", help="override automatic model routing for this task")
+    spawn.add_argument(
+        "--effort",
+        choices=CDX_EFFORTS,
+        default="high",
+        help=(
+            "cdx tier; automatic Codex: medium=Terra/high, high=Sol/high, max=Sol/xhigh; "
+            "Fable override: medium=low, high=medium, max=xhigh"
+        ),
+    )
     spawn.add_argument("--no-preamble", action="store_true")
     spawn.add_argument("--stall-after", type=int, default=300)
     spawn.set_defaults(func=spawn_task)
