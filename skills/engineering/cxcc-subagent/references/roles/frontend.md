@@ -16,7 +16,7 @@ First decide the mode; it changes everything that follows:
 
 In both modes:
 - **Everything earns its place.** No filler copy, no decorative descriptions, no structural devices that don't encode meaning (numbered markers only for real sequences). If an element's job cannot be named, cut it.
-- Copy is interface: name things by what the user controls, active voice, one consistent name per action across the flow, errors state what happened and how to fix it. No apologies, no vagueness.
+- Copy is interface: name things by what the user controls, active voice, one consistent name per action across the flow, errors state what happened and how to fix it. No apologies, no vagueness. Never use em-dashes in copy: they read as AI-generated; use commas, colons, or a rephrase.
 - Motion only where it serves; scattered effects read as generated. Respect reduced motion.
 - Quality floor, unannounced: responsive down to mobile, visible keyboard focus, disciplined CSS specificity (watch section/element selectors cancelling each other's spacing).
 
