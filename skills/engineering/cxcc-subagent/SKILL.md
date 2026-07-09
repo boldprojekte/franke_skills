@@ -29,8 +29,11 @@ Pass role files by path — never read them; they are Codex-facing and cost you 
 | Role file | Use for | Your task file must contain |
 |---|---|---|
 | `roles/general.md` | implementation, refactors, bug fixes, tests — the default for hands-on work | a work order: goal, repo paths, constraints, non-goals, proof expected, output shape |
+| `roles/explore.md` | read-only codebase questions — locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
 | `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
+
+**Explore tasks:** delegate only questions that would take you more than a few directed searches — for a single lookup, search yourself. Ask specific, well-scoped questions; fan out parallel explorers with distinct focuses for independent questions; send follow-ups on a related question to the same task via `send` instead of respawning. Trust the returned ANSWER/EVIDENCE/GAPS report — don't re-run its searches; the EVIDENCE `file:line` anchors are for jumping into code, the GAPS section is the honest bound of the answer. Explore is a cheap-and-fast role: spawn it with `--backend codex --model gpt-5.5 --effort medium` unless the question is genuinely hard.
 
 **For any code review, read references/review.md first** — it defines the review contract (target, axes, sources — stated to the user before spawning), the target-file format, the parallel two-axis run, and the adjudication step. Don't improvise a review flow when that file exists.
 
@@ -95,7 +98,7 @@ Parallel tasks are the point: separate repos (or non-overlapping dirs), one spaw
 
 ## Backends, models, effort
 
-`spawn --backend codex|claude` (default codex) — identical verbs, states, and roles either way; pick claude when the task benefits from a Claude model, codex otherwise. `--effort medium|high|max` (default high) is a per-task choice — medium for mechanical work, max for the hardest problems; cdx translates to each backend's own scale. Model defaults are machine-level policy, not per-spawn knowledge: they live in `cdx config` (self-describing via `--help`) — touch it only when the user asks to change models; `--model` overrides a single task.
+`spawn --backend codex|claude|grok` (default codex) — identical verbs, states, and roles across all three; pick claude when the task benefits from a Claude model, grok for an xAI Grok model, codex otherwise. `--effort medium|high|max` (default high) is a per-task choice — medium for mechanical work, max for the hardest problems; cdx translates to each backend's own scale. Model defaults are machine-level policy, not per-spawn knowledge: they live in `cdx config` (self-describing via `--help`) — touch it only when the user asks to change models; `--model` overrides a single task. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
 
 ## Housekeeping
 
