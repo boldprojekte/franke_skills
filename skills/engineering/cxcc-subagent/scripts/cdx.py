@@ -17,16 +17,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
 TURN_STARTUP_GRACE_S = 15
 CDX_EFFORTS = ("medium", "high", "max")
-CODEX_AUTO_ROUTES = {
-    "medium": ("gpt-5.6-terra", "high"),
-    "high": ("gpt-5.6-sol", "high"),
-    "max": ("gpt-5.6-sol", "xhigh"),
+CODEX_DEFAULT_MODEL = "sol"
+CODEX_MODEL_ALIASES = {
+    "sol": "gpt-5.6-sol",
+    "terra": "gpt-5.6-terra",
 }
 FABLE_EFFORTS = {"medium": "low", "high": "medium", "max": "xhigh"}
 SPAWN_PREAMBLE = """[orchestration protocol] You are run non-interactively by an orchestrating
@@ -163,7 +163,7 @@ class ClaudeBackend:
 
     name = "claude"
     bin_name, bin_env, install_hint = "claude", "CDX_CLAUDE_BIN", "install Claude Code"
-    efforts = {"medium": "high", "high": "xhigh", "max": "max"}
+    efforts = {"medium": "medium", "high": "high", "max": "xhigh"}
     uses_prompt_file = False  # prompt is piped on stdin
 
     def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
@@ -451,10 +451,11 @@ def is_fable_model(model: str | None) -> bool:
 
 
 def resolve_execution(backend: str, effort: str, model: str | None) -> tuple[str | None, str]:
-    """Resolve cdx's stable effort vocabulary to a concrete provider execution."""
+    """Resolve cdx's stable model/effort vocabulary to a concrete provider execution."""
     validate_effort(effort)
-    if backend == "codex" and model is None:
-        return CODEX_AUTO_ROUTES[effort]
+    if backend == "codex":
+        alias = (model or CODEX_DEFAULT_MODEL).lower()
+        model = CODEX_MODEL_ALIASES.get(alias, model)
     if backend == "claude" and is_fable_model(model):
         return model, FABLE_EFFORTS[effort]
     provider_effort = backend_effort(backend, effort)
@@ -1445,14 +1446,17 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("-C", "--repo", required=True)
     spawn.add_argument("--backend", choices=list(BACKENDS), default="codex")
     spawn.add_argument("--name")
-    spawn.add_argument("--model", help="override automatic model routing for this task")
+    spawn.add_argument(
+        "--model",
+        help="model tier for this task; codex: sol|terra (default sol), claude: opus|sonnet; raw provider model names pass through",
+    )
     spawn.add_argument(
         "--effort",
         choices=CDX_EFFORTS,
-        default="high",
+        default="medium",
         help=(
-            "cdx tier; automatic Codex: medium=Terra/high, high=Sol/high, max=Sol/xhigh; "
-            "Fable override: medium=low, high=medium, max=xhigh"
+            "reasoning dial, uniform across backends: medium=medium, high=high, max=xhigh "
+            "(grok caps at high; Fable override: medium=low, high=medium, max=xhigh)"
         ),
     )
     spawn.add_argument("--no-preamble", action="store_true")

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 (2026-07-09)
+
+- Replace effort-based Codex auto-routing with symmetric model tiers: the agent picks `sol|terra` on codex exactly like `opus|sonnet` on claude; cdx pins the aliases to concrete model IDs (`gpt-5.6-sol`/`gpt-5.6-terra`, default sol).
+- Make `--effort` a uniform reasoning dial across backends: medium→medium, high→high, max→xhigh (grok caps at high); each provider's very top tier (Claude max, Codex ultra) stays deliberately unreachable. Default effort drops from high to medium.
+- Task-shape defaults follow suit: general coding codex/sol/high (sol/medium for genuinely simple tasks), explore codex/terra/medium (or claude/sonnet/medium), taste-heavy claude/opus/max, review at max effort with the opposite provider of the builder, computer-use codex/terra/high.
+
 ## 0.3.0 (2026-07-09)
 
 - Keep the agent-facing effort vocabulary at `medium | high | max`, but route automatic Codex work deterministically: medium to GPT-5.6 Terra/high, high to GPT-5.6 Sol/high, and max to GPT-5.6 Sol/xhigh.

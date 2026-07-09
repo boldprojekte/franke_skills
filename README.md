@@ -62,15 +62,17 @@ Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answer
 
 When using the source checkout directly, replace `.agents/skills/cxcc-subagent` with `skills/engineering/cxcc-subagent`.
 
-### Three stable effort tiers
+### Model tiers and a uniform effort dial
 
-Agents choose only `medium`, `high`, or `max`. `cdx` translates that stable vocabulary to the provider's current model and reasoning controls:
+The orchestrating agent picks a model tier per backend through stable aliases — `opus|sonnet` on claude, `sol|terra` on codex (default `sol`) — and a reasoning effort that translates uniformly everywhere:
 
-| `cdx --effort` | Automatic Codex execution |
-|---|---|
-| `medium` | GPT-5.6 Terra at high reasoning |
-| `high` | GPT-5.6 Sol at high reasoning |
-| `max` | GPT-5.6 Sol at xhigh reasoning |
+| `cdx --effort` | codex (Sol/Terra) | claude (Opus/Sonnet) | grok |
+|---|---|---|---|
+| `medium` (default) | medium | medium | medium |
+| `high` | high | high | high |
+| `max` | xhigh | xhigh | high (its ceiling) |
+
+Each provider's very top reasoning tier (Claude `max`, Codex `ultra`) is deliberately unreachable through this surface. cdx pins the aliases to concrete model IDs (currently GPT-5.6 Sol/Terra), so provider model bumps never require agent-facing changes.
 
 Fable 5 is never selected automatically. It is available only through an explicit user-directed model override and gets its own effort translation (`medium → low`, `high → medium`, `max → xhigh`) to keep subagent cost in check. JSON responses report the public effort, resolved model, and provider effort separately.
 
