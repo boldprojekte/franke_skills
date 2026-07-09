@@ -99,6 +99,8 @@ python3 $CDX peek <task> --thinking --json   # emergency only: ~1000 chars of li
 
 Parallel tasks are the point: separate repos (or non-overlapping dirs), one spawn each, one `list` to watch them all. Two tasks writing the same checkout will trample each other, so cdx warns on spawn; take the warning seriously.
 
+Keep the user oriented while tasks are in flight. With more than one task, show a compact plan table after spawning and at each check-in: task + one-line goal, backend/model/effort, status (running / waiting on X / done). A single task needs a sentence, not a table.
+
 ## Backends, models, effort
 
 `spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. `--effort medium|high|max` (default high) is a per-task choice; cdx translates to each backend's own scale. Pick by task shape along cost / taste / intelligence. These are defaults with reasons; deviate when the task tells you to:

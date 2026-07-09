@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-07-09)
+
+- SKILL.md: while multiple tasks are in flight, the agent shows a compact plan table (task + goal, backend/model/effort, status) after spawning and at each check-in; a single task gets a sentence instead.
+
 ## 0.2.0 (2026-07-09)
 
 First public release.
