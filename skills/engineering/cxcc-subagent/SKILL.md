@@ -103,3 +103,5 @@ Parallel tasks are the point: separate repos (or non-overlapping dirs), one spaw
 ## Housekeeping
 
 `python3 $CDX doctor` before first use of a session if anything smells off (binary, state dir, orphans). `python3 $CDX clean --terminal` once results are harvested — a lean task list keeps `list` readable.
+
+When the user asks to update this skill, read references/update.md and follow it — it fetches the latest published version, shows the user what changed, and applies it safely.
