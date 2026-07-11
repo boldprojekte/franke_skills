@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (2026-07-11)
+
+- Rework the two-axis review: the "Standards" axis becomes **Correctness & Quality** (`roles/review-correctness.md`), which hunts behavioral bugs first, then repo conventions and the Fowler smell baseline. Both axes adopt P0–P3 severity (with anti-inflation calibration keyed to "would this block the merge?"), a mandatory residual-risk close, and judgment-first framing so the smell baseline stays a floor, not a nitpick checklist.
+- Simplify the `FINDINGS:` line on both review axes to a plain completion sentinel (`FINDINGS: <n>` / `none`): it proves a detached run finished, it is not a count to parse — the orchestrator's adjudication reads the findings themselves.
+- Lower the review effort default from `max` to `high`.
+- SKILL.md accuracy pass, found by the new reviewer and verified against `cdx.py`: document the `kill <task>` verb; note that exit `12` (stalled) comes only from `status`/`peek` while `result` collapses stalled into `13`; scope model-alias pinning to codex (claude/grok forward the alias to the provider CLI); flag that a grok task stalled or interrupted on its first turn has no resumable session; correct "reaps true hangs" to the inactivity timeout it actually is.
+
 ## 0.4.0 (2026-07-09)
 
 - Replace effort-based Codex auto-routing with symmetric model tiers: the agent picks `sol|terra` on codex exactly like `opus|sonnet` on claude; cdx pins the aliases to concrete model IDs (`gpt-5.6-sol`/`gpt-5.6-terra`, default sol).

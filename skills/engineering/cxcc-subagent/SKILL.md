@@ -5,7 +5,7 @@ description: "Spawns, monitors, steers, and collects detached Codex CLI, Claude 
 
 # CXCC Subagent
 
-`cdx` supervises detached `codex exec` sessions. Spawn returns immediately, a watchdog reaps true hangs, and escalated questions surface as an explicit state instead of dying in a log. Division of labour stays as in codex-first: Codex types, you think. Spec before, review after.
+`cdx` supervises detached `codex exec` sessions. Spawn returns immediately, a watchdog reaps silent tasks (no output for 5 min), and escalated questions surface as an explicit state instead of dying in a log. Division of labour stays as in codex-first: Codex types, you think. Spec before, review after.
 
 The CLI is `scripts/cdx.py` inside this skill folder; it runs from any cwd and needs only Python 3.10+.
 
@@ -15,7 +15,7 @@ CDX="$SKILL_DIR/scripts/cdx.py"
 ROLES="$SKILL_DIR/references/roles"
 ```
 
-Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exit codes: 0 ok · 2 usage · 3 not found · 4 invalid state · 5 backend/internal · 6 timeout · 7 binary missing · 10 working · 11 awaiting_reply · 12 stalled · 13 failed/killed. If a JSON field is genuinely unclear, the source of truth is `scripts/cdx.py`.
+Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exit codes: 0 ok · 2 usage · 3 not found · 4 invalid state · 5 backend/internal · 6 timeout · 7 binary missing · 10 working · 11 awaiting_reply · 12 stalled · 13 failed/killed. Caveat: `12` only comes from `status`/`peek`; `result` collapses a stalled task into `13`, so read the JSON `state` field, not the exit code, when you need to tell stalled from failed. If a JSON field is genuinely unclear, the source of truth is `scripts/cdx.py`.
 
 ## Roles
 
@@ -33,7 +33,7 @@ Pass role files by path. Never read them; they are Codex-facing and cost you not
 | `roles/explore.md` | read-only codebase questions: locating code, mapping how something works, checking whether X exists | the question(s), repo scope/paths, a thoroughness level (quick / medium / very thorough), any answer-format needs |
 | `roles/frontend.md` | UI work: building new interfaces or changing existing ones without producing design slop | the brief/change, greenfield or brownfield, the pages/components that define the surrounding design (brownfield), brand constraints if any, proof expected (build + visual check) |
 | `roles/computer-use.md` | E2E verification by driving the running product: browser flows, app behavior, screenshots, runtime state; user-triggered, not automatic | what was built/changed, the exact flows to drive, how to launch the app, expected behavior per flow, environment bounds (test accounts, what's off-limits) |
-| `roles/review-standards.md` | reviewing a change against repo conventions + smell baseline | the review target file per references/review.md |
+| `roles/review-correctness.md` | reviewing a change for correctness (behavioral bugs) + repo conventions + smell baseline, severity-ranked | the review target file per references/review.md |
 | `roles/review-spec.md` | reviewing a change against the plan/spec it was built from | the review target file per references/review.md |
 
 **Explore tasks:** delegate only questions that would cost you more than a few directed searches; ask them specific and well-scoped, fan out parallel explorers for independent questions, and follow up on the same task via `send`. Trust the ANSWER/EVIDENCE/GAPS report. Don't re-run its searches.
@@ -83,6 +83,8 @@ python3 $CDX send <task> --now "Stop, wrong approach. Refactor X instead" --json
 
 `send` refuses while a task is running; that refusal is the guard against accidental interrupts. Reach for `--now` deliberately, when the thinking stream shows a wrong turn, not because you're impatient.
 
+Kill a runaway outright with `python3 $CDX kill <task> --json`; the process stops, the task moves to `killed`, and it stays resumable via `send`.
+
 ## When unsure what a task is doing
 
 Escalate probes in cost order, and stop at the first one that settles wait-vs-steer-vs-kill:
@@ -105,10 +107,10 @@ Keep the user oriented while tasks are in flight. With more than one task, show 
 
 `spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. Every task has two dials, with the same mental model on every backend:
 
-- **Model tier** via `--model`: `opus|sonnet` on claude, `sol|terra` on codex (default `sol`). These are stable aliases — cdx pins the concrete provider model behind them, so never write raw provider model names yourself.
+- **Model tier** via `--model`: `opus|sonnet` on claude, `sol|terra` on codex (default `sol`). Always use these stable aliases, never raw provider model names. On codex, cdx pins the concrete provider model behind `sol`/`terra`; on claude/grok the alias is forwarded to the provider CLI, which resolves it there.
 - **Effort** via `--effort medium|high|max` (default `medium`): the reasoning dial, translated uniformly; each provider's very top reasoning tier stays deliberately outside this surface.
 
-If the user asks what actually ran, the JSON output of every verb reports the resolved `model` and `provider_effort`.
+If the user asks what actually ran, the JSON output of every verb reports `model` and `provider_effort`. On codex `model` is the resolved concrete id; on claude/grok it's the alias you passed (or `null` if you let the provider default it), since the provider CLI does the resolving.
 
 **Fable is user-directed only.** Never select `fable` or `claude-fable-5` from task shape, cost, taste, or review heuristics; as a subagent it is normally too expensive. Spawn it only when the user explicitly asks for Fable (`--backend claude --model fable`); effort translation is handled by cdx as usual.
 
@@ -119,10 +121,10 @@ Pick by task shape along cost / taste / intelligence. These are defaults with re
 | taste-heavy: prose, frontend/UI, API design, anything that must *feel* right | claude / opus / max | taste: Anthropic models have the strongest judgment for language and aesthetics; this is where the top dial earns its cost |
 | general coding: features, refactors, bug fixes, tests | codex / sol / high; drop to sol / medium when the task is genuinely simple; grok as the equal-footing budget alternative | intelligence per cost for the workhorse |
 | explore + mechanical work: codebase questions, migrations, format churn | codex / terra / medium, or claude / sonnet / medium | cost and speed; the intelligence bar is lower |
-| review | `max` effort with a **different provider than the one that built**: claude / opus / max when codex built; codex / sol / max when claude or grok built | cross-review catches what self-image misses; Sonnet is for exploration, not the default reviewer |
+| review | `high` effort with a **different provider than the one that built**: claude / opus / high when codex built; codex / sol / high when claude or grok built | cross-review catches what self-image misses; Sonnet is for exploration, not the default reviewer |
 | computer-use / E2E verification | codex / terra / high, **always codex** | the codex harness is by far the strongest at driving UIs; this pin is part of the role, not a preference; driving flows needs stamina, not deep reasoning |
 
-Machine-level defaults live in `cdx config` (self-describing via `--help`); touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected).
+Machine-level defaults live in `cdx config` (self-describing via `--help`); touch those only when the user asks. Note: the grok stream does not surface tool calls, so `peek` and `last_activity` are sparser for grok tasks than for codex/claude (state and results are unaffected). One grok-only edge: a grok task that stalls or is interrupted during its *first* turn has no resumable session yet (the session id only lands on a completed turn), so `send` can't resume it — respawn instead. Codex and claude resume cleanly from a first-turn stall.
 
 ## Housekeeping
 
