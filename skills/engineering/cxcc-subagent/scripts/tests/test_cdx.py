@@ -927,6 +927,23 @@ class OwnerScopingTests(TempCase):
         clean_any = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"})
         self.assertEqual(json.loads(clean_any.stdout)["removed"], ["bob-one"])
 
+    def test_clean_repo_filter_reaps_across_owners(self):
+        # a task spawned with -C for a repo, under a different owner (e.g. a different
+        # spawning cwd): a plain sweep treats it as foreign, but `clean -C <repo>` reaps it.
+        self.fake_bin = str(make_fake_codex(self.base))
+        state = self.base / "state"
+        repo = self.git_repo("repo")
+        self.spawn_done(state, repo, "cross-task", "elsewhere")
+
+        here = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "here"}
+        plain = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal"], env=here)
+        plain_data = json.loads(plain.stdout)
+        self.assertEqual(plain_data["removed"], [])
+        self.assertEqual(plain_data["skipped_foreign"], 1)
+
+        scoped = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal", "-C", str(repo)], env=here)
+        self.assertEqual(json.loads(scoped.stdout)["removed"], ["cross-task"])
+
     def test_owner_defaults_to_cwd_when_env_unset(self):
         self.fake_bin = str(make_fake_codex(self.base))
         state = self.base / "state"

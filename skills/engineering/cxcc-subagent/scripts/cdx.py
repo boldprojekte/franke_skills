@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -1398,12 +1398,18 @@ def clean_tasks(args: argparse.Namespace) -> int:
     else:
         # --terminal/--all sweep the shared registry: scope to our own tasks so a
         # sibling session's uncollected results survive. --any-owner opts back into
-        # the global sweep (also the only way to reap pre-owner legacy tasks).
+        # the global sweep (also the only way to reap pre-owner legacy tasks); -C/--repo
+        # is the targeted escape hatch: reap this repo's terminal tasks regardless of the
+        # cwd they were spawned from (e.g. tasks spawned with `-C` from another directory).
         me = task_owner()
+        repo_filter = str(Path(args.repo).expanduser().resolve()) if args.repo else None
         for path in sorted(tasks_dir(root).glob("*")):
             if not path.is_dir():
                 continue
-            if not args.any_owner and load_meta(path).get("owner") != me:
+            meta = load_meta(path)
+            mine = args.any_owner or meta.get("owner") == me
+            repo_match = repo_filter is not None and meta.get("repo") == repo_filter
+            if not (mine or repo_match):
                 skipped_foreign += 1
                 continue
             if list_payload(path.name, path)["state"] not in TERMINAL_STATES:
@@ -1437,7 +1443,7 @@ def clean_tasks(args: argparse.Namespace) -> int:
     }
     notes = []
     if skipped_foreign and not args.any_owner:
-        notes.append(f"skipped {skipped_foreign} task(s) owned by other sessions; use --any-owner to include them")
+        notes.append(f"skipped {skipped_foreign} task(s) owned by other sessions; use -C <repo> to reap a specific repo's tasks, or --any-owner for all")
     if skipped_running:
         notes.append(f"skipped {skipped_running} running task(s); kill them first, then clean")
     if skipped_finalizing:
@@ -1627,6 +1633,7 @@ def build_parser() -> argparse.ArgumentParser:
     clean.add_argument("--terminal", action="store_true")
     clean.add_argument("--all", action="store_true")
     clean.add_argument("--any-owner", action="store_true", help="with --terminal/--all, include tasks owned by other sessions (default: only your own)")
+    clean.add_argument("-C", "--repo", help="with --terminal/--all, also reap terminal tasks that target this repo, regardless of the cwd they were spawned from")
     clean.add_argument("--dry-run", action="store_true")
     clean.set_defaults(func=clean_tasks)
 

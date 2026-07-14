@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 (2026-07-15)
+
+- Add `clean -C/--repo <path>`: a targeted reap of a repo's terminal tasks regardless of the cwd they were spawned from. The owner fallback is the spawning cwd, so a task spawned with `-C /repo` from another directory is owned by that directory and a later `clean` from `/repo` would treat it as foreign and leave it behind. `clean -C /repo` reaps it (still terminal-only, still leaves running tasks alone) without the blunt `clean --any-owner`. The skipped-foreign hint now points at both `-C` and `--any-owner`.
+
 ## 0.6.0 (2026-07-14)
 
 - Make `clean` owner-scoped so parallel sessions stop clobbering each other. The task registry (`~/.codex-agents/tasks`) is shared by every session on the machine, and `clean --terminal`/`--all` used to sweep it globally, deleting a sibling session's finished-but-uncollected results (and, with `--all`, its still-running tasks). This is backend-agnostic: codex, claude, and grok tasks all shared the one registry and the one sweep.
