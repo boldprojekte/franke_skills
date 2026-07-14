@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 (2026-07-14)
+
+- Make `clean` owner-scoped so parallel sessions stop clobbering each other. The task registry (`~/.codex-agents/tasks`) is shared by every session on the machine, and `clean --terminal`/`--all` used to sweep it globally, deleting a sibling session's finished-but-uncollected results (and, with `--all`, its still-running tasks). This is backend-agnostic: codex, claude, and grok tasks all shared the one registry and the one sweep.
+- Each task now records an `owner` at spawn (`CDX_OWNER` if set, else the resolved cwd, so separate worktrees isolate with zero config). `clean --terminal`/`--all` only remove tasks owned by the current session; `owner` is surfaced in `status`/`list`, and the JSON reports a `skipped_foreign` count.
+- Add `clean --any-owner` to restore the global sweep as a deliberate opt-in (also the only way to reap pre-owner legacy tasks). `kill`/`clean --task` were already correctly single-target and are unchanged.
+- `clean` now refuses to remove a still-running (or still-starting) task: `clean --task` on one errors with "kill it first", and `--terminal`/`--all` skip it (reported as `skipped_running`). Interrupting-then-deleting a live task raced the detached supervisor, which could resurrect the directory as a partial `failed` entry or orphan the backend, so clean only ever reaps terminal tasks now, the same rule `send` follows. Kill a task first (`cdx kill`) if you want it gone.
+- Harden the detached supervisor against resurrecting a cleaned task: it finalizes state through a new non-creating write, so if `clean` removed the directory in the meantime the write fails cleanly instead of re-creating a stale task. Read paths (`status`/`list`/`result`) that opportunistically persist derived state no longer resurrect a cleaned task either. `clean` re-checks each task is still terminal immediately before removing it, and reports a genuine `rmtree` failure instead of miscounting it as a skipped running task.
+- SKILL.md: replace the blanket "`clean --terminal` once results are harvested" housekeeping advice with the owner-scoping contract and the `CDX_OWNER` override.
+
 ## 0.5.0 (2026-07-11)
 
 - Rework the two-axis review: the "Standards" axis becomes **Correctness & Quality** (`roles/review-correctness.md`), which hunts behavioral bugs first, then repo conventions and the Fowler smell baseline. Both axes adopt P0–P3 severity (with anti-inflation calibration keyed to "would this block the merge?"), a mandatory residual-risk close, and judgment-first framing so the smell baseline stays a floor, not a nitpick checklist.
