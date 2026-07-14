@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import random
@@ -17,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.0"
+VERSION = "0.6.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -366,8 +367,9 @@ def ensure_state(root: Path) -> None:
     tasks_dir(root).mkdir(parents=True, exist_ok=True)
 
 
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def atomic_write_json(path: Path, data: dict[str, Any], create_parent: bool = True) -> None:
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -392,6 +394,23 @@ def load_meta(tdir: Path) -> dict[str, Any]:
 
 def save_meta(tdir: Path, meta: dict[str, Any]) -> None:
     atomic_write_json(tdir / "meta.json", meta)
+
+
+def finalize_meta(tdir: Path, meta: dict[str, Any]) -> None:
+    """Persist meta from the detached supervisor without resurrecting a cleaned task.
+
+    The supervisor writes final state after the backend process exits. If `clean`
+    removed the task dir in the meantime, a plain `save_meta` would re-create it
+    (its parent `mkdir`), resurrecting the task as a partial `failed` entry. Here
+    we skip the write when the dir is gone and, to close the check-then-write race,
+    write without re-creating the parent so a concurrent `rmtree` surfaces as
+    FileNotFoundError instead of a resurrected directory."""
+    if not tdir.exists():
+        return
+    try:
+        atomic_write_json(tdir / "meta.json", meta, create_parent=False)
+    except FileNotFoundError:
+        return
 
 
 def valid_task_name(name: str) -> bool:
@@ -427,6 +446,23 @@ def locate_backend(backend: str) -> str:
 def meta_backend(meta: dict[str, Any]) -> str:
     value = meta.get("backend")
     return str(value) if value in BACKENDS else "codex"
+
+
+def task_owner() -> str:
+    """Identity that scopes `clean` to the session/worktree that spawned a task.
+
+    The registry (`~/.codex-agents/tasks`) is shared by every session on the
+    machine, so a blanket `clean --terminal`/`--all` would delete sibling
+    sessions' still-uncollected results. Stamping an owner and scoping clean to
+    it keeps parallel sessions from stepping on each other.
+
+    `CDX_OWNER` (the skill sets it to a stable session id) wins; otherwise the
+    resolved cwd, so parallel *worktrees* get distinct owners with zero config.
+    Two sessions sharing one cwd should set `CDX_OWNER` to stay isolated."""
+    override = os.environ.get("CDX_OWNER", "").strip()
+    if override:
+        return override
+    return str(Path.cwd().resolve())
 
 
 def validate_effort(effort: str | None) -> None:
@@ -753,7 +789,10 @@ def refresh_meta(tdir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], str,
         meta["turns"] = int(meta["turns_launched"])
         changed = True
     if changed:
-        save_meta(tdir, meta)
+        # read paths (status/list/result/peek) persist derived state opportunistically;
+        # use the non-creating write so a concurrent `clean` isn't undone by resurrecting
+        # the task dir we just observed
+        finalize_meta(tdir, meta)
     return meta, events, state, alive
 
 
@@ -801,6 +840,7 @@ def status_payload(name: str, tdir: Path) -> dict[str, Any]:
     }
     payload.update(
         {
+            "owner": meta.get("owner"),
             "thread_id": meta.get("thread_id"),
             "pid": meta.get("pid"),
             "pid_alive": alive,
@@ -829,6 +869,7 @@ def list_payload(name: str, tdir: Path) -> dict[str, Any]:
             "effort",
             "provider_effort",
             "state",
+            "owner",
             "repo",
             "age_s",
             "last_output_age_s",
@@ -943,6 +984,7 @@ def spawn_task(args: argparse.Namespace) -> int:
     meta = {
         "task": name,
         "backend": backend,
+        "owner": task_owner(),
         "repo": str(repo),
         "thread_id": None,
         "pid": None,
@@ -1014,7 +1056,7 @@ def run_turn(args: argparse.Namespace) -> int:
                 thread_id = newest_thread_id(events, backend)
                 if thread_id and meta.get("thread_id") != thread_id:
                     meta["thread_id"] = thread_id
-                    save_meta(tdir, meta)
+                    finalize_meta(tdir, meta)
                     thread_id_captured = True
             if not stall_after or now() < next_check:
                 continue
@@ -1040,7 +1082,7 @@ def run_turn(args: argparse.Namespace) -> int:
                         "stall_bytes_after": after,
                     }
                 )
-                save_meta(tdir, meta)
+                finalize_meta(tdir, meta)
                 return 0
             next_check = now() + check_interval
     if stdin_file is not None:
@@ -1055,7 +1097,7 @@ def run_turn(args: argparse.Namespace) -> int:
     meta["turns_launched"] = turns_launched(meta, events)
     meta["turns"] = max(int(meta.get("turns") or 0), int(meta["turns_launched"]), turn_count(events, backend))
     meta["state"] = derive_state(meta, events, False)
-    save_meta(tdir, meta)
+    finalize_meta(tdir, meta)
     return 0
 
 
@@ -1315,20 +1357,76 @@ def clean_tasks(args: argparse.Namespace) -> int:
     selectors = sum(1 for value in (args.task, args.terminal, args.all) if value)
     if selectors != 1:
         raise CdxError(2, "choose exactly one clean selector: --task NAME, --terminal, or --all")
+    # clean only removes tasks that are already terminal. A live (or still-starting)
+    # task is never removed: interrupting-then-deleting races the detached supervisor,
+    # which can resurrect the directory or orphan the backend. Kill it first instead,
+    # the same rule `send` follows. This keeps clean fully race-free by construction.
     selected: list[Path] = []
+    skipped_foreign = 0
+    skipped_running = 0
     if args.task:
-        _, tdir = resolve_task(root, args.task)
+        # an explicit name is a deliberate target; clean it regardless of owner
+        name, tdir = resolve_task(root, args.task)
+        if list_payload(name, tdir)["state"] not in TERMINAL_STATES:
+            raise CdxError(4, f"task {name} is still running; kill it first (cdx kill {name}), then clean")
         selected.append(tdir)
-    elif args.all:
-        selected = [path for path in tasks_dir(root).glob("*") if path.is_dir()]
     else:
-        selected = [path for path in tasks_dir(root).glob("*") if path.is_dir() and list_payload(path.name, path)["state"] in TERMINAL_STATES]
+        # --terminal/--all sweep the shared registry: scope to our own tasks so a
+        # sibling session's uncollected results survive. --any-owner opts back into
+        # the global sweep (also the only way to reap pre-owner legacy tasks).
+        me = task_owner()
+        for path in sorted(tasks_dir(root).glob("*")):
+            if not path.is_dir():
+                continue
+            if not args.any_owner and load_meta(path).get("owner") != me:
+                skipped_foreign += 1
+                continue
+            if list_payload(path.name, path)["state"] not in TERMINAL_STATES:
+                # --all's scope includes running tasks but still won't delete them;
+                # --terminal never targeted them in the first place
+                if args.all:
+                    skipped_running += 1
+                continue
+            selected.append(path)
     names = [path.name for path in selected]
+    removed: list[str] = []
     if not args.dry_run:
         for path in selected:
-            shutil.rmtree(path)
-    data = {"removed": [] if args.dry_run else names, "would_remove": names if args.dry_run else []}
-    emit(args, data, " ".join(names))
+            # re-check right before deleting: a concurrent `send` may have resumed this
+            # task since we selected it. Not a full lock, but shrinks the window to ~0.
+            if list_payload(path.name, path)["state"] not in TERMINAL_STATES:
+                skipped_running += 1
+                continue
+            try:
+                shutil.rmtree(path)
+                removed.append(path.name)
+            except FileNotFoundError:
+                # already gone (a concurrent clean beat us to it); nothing to do
+                pass
+            except OSError as exc:
+                if exc.errno == errno.ENOTEMPTY:
+                    # the supervisor recreated meta.json mid-rmtree while finalizing this
+                    # just-terminal task; the dir is left behind, re-run clean to reap it
+                    skipped_running += 1
+                else:
+                    # a real failure (permissions, I/O): surface it, don't mislabel it
+                    raise CdxError(5, f"could not remove task {path.name}: {exc}")
+    data = {
+        "removed": removed,
+        "would_remove": names if args.dry_run else [],
+        "skipped_foreign": skipped_foreign,
+        "skipped_running": skipped_running,
+    }
+    notes = []
+    if skipped_foreign and not args.any_owner:
+        notes.append(f"skipped {skipped_foreign} task(s) owned by other sessions; use --any-owner to include them")
+    if skipped_running:
+        notes.append(f"skipped {skipped_running} running task(s); kill them first, then clean")
+    message = " ".join(names)
+    if notes:
+        joined = "; ".join(notes)
+        message = f"{message} ({joined})" if message else f"({joined})"
+    emit(args, data, message)
     return 0
 
 
@@ -1508,6 +1606,7 @@ def build_parser() -> argparse.ArgumentParser:
     clean.add_argument("--task")
     clean.add_argument("--terminal", action="store_true")
     clean.add_argument("--all", action="store_true")
+    clean.add_argument("--any-owner", action="store_true", help="with --terminal/--all, include tasks owned by other sessions (default: only your own)")
     clean.add_argument("--dry-run", action="store_true")
     clean.set_defaults(func=clean_tasks)
 

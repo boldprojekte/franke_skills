@@ -835,5 +835,144 @@ class RealBackendSmokeTests(TempCase):
         self.assertIn("FOLLOWUP-OK", json.loads(followup_result.stdout)["message"])
 
 
+class OwnerScopingTests(TempCase):
+    def run_cdx(self, args, env=None, cwd=None):
+        full_env = os.environ.copy()
+        if env:
+            full_env.update(env)
+        return subprocess.run(
+            [sys.executable, str(CDX), *args],
+            cwd=cwd or self.base,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=full_env,
+        )
+
+    def git_repo(self, name):
+        repo = self.base / name
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        return repo
+
+    def spawn_done(self, state, repo, name, owner):
+        env = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": owner}
+        spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", name, "hello"], env=env)
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status = self.run_cdx(["status", "--json", "--state-dir", str(state), name], env={"CDX_CODEX_BIN": self.fake_bin})
+            if json.loads(status.stdout)["state"] == "done":
+                return
+            time.sleep(0.2)
+        self.fail(f"{name} did not reach done")
+
+    def test_clean_terminal_is_owner_scoped(self):
+        self.fake_bin = str(make_fake_codex(self.base))
+        state = self.base / "state"
+        repo = self.git_repo("repo")
+        self.spawn_done(state, repo, "alice-one", "alice")
+        self.spawn_done(state, repo, "alice-two", "alice")
+        self.spawn_done(state, repo, "bob-one", "bob")
+
+        # owner is surfaced in status and list
+        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "alice-one"], env={"CDX_CODEX_BIN": self.fake_bin})
+        self.assertEqual(json.loads(status.stdout)["owner"], "alice")
+
+        # alice's sweep leaves bob's uncollected task and reports the skip
+        clean = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal"], env={"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"})
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        data = json.loads(clean.stdout)
+        self.assertEqual(sorted(data["removed"]), ["alice-one", "alice-two"])
+        self.assertEqual(data["skipped_foreign"], 1)
+
+        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env={"CDX_CODEX_BIN": self.fake_bin})
+        remaining = json.loads(listing.stdout)
+        self.assertEqual([t["task"] for t in remaining], ["bob-one"])
+        self.assertEqual(remaining[0]["owner"], "bob")
+
+        # --any-owner is the deliberate global sweep
+        clean_any = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"})
+        self.assertEqual(json.loads(clean_any.stdout)["removed"], ["bob-one"])
+
+    def test_owner_defaults_to_cwd_when_env_unset(self):
+        self.fake_bin = str(make_fake_codex(self.base))
+        state = self.base / "state"
+        repo = self.git_repo("repo")
+        worktree = self.base / "worktreeA"
+        worktree.mkdir()
+        env = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": ""}  # empty → falls back to cwd
+        spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "cwd-task", "hi"], env=env, cwd=worktree)
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "cwd-task"], env=env)
+        self.assertEqual(json.loads(status.stdout)["owner"], str(worktree.resolve()))
+
+    def start_running_task(self, state, repo, name, env):
+        spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", name, "--stall-after", "600", "STALL_MODE"], env=env)
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        pid = None
+        deadline = time.time() + 30  # generous: only the failure path waits this long
+        while time.time() < deadline:
+            status = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), name], env=env).stdout)
+            if status.get("pid") and status.get("pid_alive"):
+                pid = status["pid"]
+                break
+            time.sleep(0.2)
+        self.assertIsNotNone(pid, f"{name} never reported a live pid")
+        return pid
+
+    def test_clean_never_removes_a_running_task(self):
+        self.fake_bin = str(make_fake_codex(self.base))
+        state = self.base / "state"
+        repo = self.git_repo("repo")
+        env = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "solo"}
+        pid = self.start_running_task(state, repo, "runner", env)
+        runner_dir = state / "tasks" / "runner"
+
+        # --all sees the running task but refuses to delete it, reporting it as skipped
+        clean = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--all"], env=env)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        data = json.loads(clean.stdout)
+        self.assertEqual(data["removed"], [])
+        self.assertEqual(data["skipped_running"], 1)
+        self.assertTrue(runner_dir.exists(), "running task dir must survive clean --all")
+        self.assertTrue(cdx.pid_alive(pid), "running backend must not be touched by clean")
+
+        # cleaning it by name errors (kill first), rather than racing the supervisor
+        by_name = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--task", "runner"], env=env)
+        self.assertEqual(by_name.returncode, 4, by_name.stdout)
+        self.assertTrue(runner_dir.exists())
+
+        # kill first: it moves the task to a terminal state, which is what clean needs.
+        # (pid liveness can flap briefly while the OS reaps the killed zombie, so we key
+        # on state, not on the pid, exactly as clean itself does.)
+        kill = self.run_cdx(["kill", "--json", "--state-dir", str(state), "runner"], env=env)
+        self.assertEqual(kill.returncode, 0, kill.stderr)
+        deadline = time.time() + 30
+        killed_state = None
+        while time.time() < deadline:
+            killed_state = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "runner"], env=env).stdout)["state"]
+            if killed_state in cdx.TERMINAL_STATES:
+                break
+            time.sleep(0.2)
+        self.assertIn(killed_state, cdx.TERMINAL_STATES)
+        # clean is re-runnable: if the supervisor is mid-finalize it's skipped, so poll
+        removed = []
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            removed = json.loads(self.run_cdx(["clean", "--json", "--state-dir", str(state), "--all"], env=env).stdout)["removed"]
+            if "runner" in removed:
+                break
+            time.sleep(0.3)
+        self.assertEqual(removed, ["runner"])
+        # and it stays gone: the supervisor never resurrects a removed dir
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            self.assertFalse(runner_dir.exists(), "killed+cleaned task dir was resurrected")
+            time.sleep(0.2)
+        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
+        self.assertEqual(json.loads(listing.stdout), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
