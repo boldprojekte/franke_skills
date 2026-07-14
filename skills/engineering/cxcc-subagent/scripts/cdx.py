@@ -1351,6 +1351,30 @@ def kill_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def remove_task_dir(path: Path) -> str:
+    """Remove a terminal task's dir, tolerating the supervisor's one-shot finalize write.
+
+    As the detached supervisor exits it may write meta.json exactly once. If that lands
+    mid-rmtree we see ENOTEMPTY (the file reappears before rmdir) or a vanished-file error
+    (rmtree expected a file the finalize temp-cleanup removed). Naively swallowing these
+    leaves the directory half-removed. The writer is single-shot, so a few short retries
+    converge. Returns "removed", or "finalizing" if it is still racing after the retries
+    (very rare, re-run clean to reap). A genuine failure (permissions, I/O) is raised."""
+    for _ in range(5):
+        try:
+            shutil.rmtree(path)
+            return "removed"
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise CdxError(5, f"could not remove task {path.name}: {exc}")
+        if not path.exists():
+            return "removed"
+        time.sleep(0.02)
+    return "removed" if not path.exists() else "finalizing"
+
+
 def clean_tasks(args: argparse.Namespace) -> int:
     root = state_root(args)
     ensure_state(root)
@@ -1398,21 +1422,12 @@ def clean_tasks(args: argparse.Namespace) -> int:
             if list_payload(path.name, path)["state"] not in TERMINAL_STATES:
                 skipped_running += 1
                 continue
-            try:
-                shutil.rmtree(path)
+            if remove_task_dir(path) == "removed":
                 removed.append(path.name)
-            except FileNotFoundError:
-                # already gone (a concurrent clean beat us to it); nothing to do
-                pass
-            except OSError as exc:
-                if exc.errno == errno.ENOTEMPTY:
-                    # the supervisor recreated meta.json mid-rmtree while finalizing this
-                    # already-terminal task; it is NOT running, so re-running clean reaps
-                    # it. Keep it distinct from skipped_running to give the right advice.
-                    skipped_finalizing += 1
-                else:
-                    # a real failure (permissions, I/O): surface it, don't mislabel it
-                    raise CdxError(5, f"could not remove task {path.name}: {exc}")
+            else:
+                # still racing the supervisor's finalize after retries (rare); NOT running,
+                # so the fix is to re-run clean, not to kill anything
+                skipped_finalizing += 1
     data = {
         "removed": removed,
         "would_remove": names if args.dry_run else [],

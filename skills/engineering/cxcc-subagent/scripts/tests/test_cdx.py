@@ -867,6 +867,38 @@ class OwnerScopingTests(TempCase):
             time.sleep(0.2)
         self.fail(f"{name} did not reach done")
 
+    def test_remove_task_dir_tolerates_finalize_race(self):
+        # the detached supervisor may write meta.json once as clean removes the dir.
+        # remove_task_dir must never leave the directory half-removed (an earlier naive
+        # rmtree left it behind ~2/3 of the time and mislabeled it as a running task).
+        import threading
+
+        left_behind = 0
+        for _ in range(200):
+            tdir = self.base / "runner"
+            (tdir / "turns").mkdir(parents=True)
+            for name in ("meta.json", "events.jsonl", "stderr.log"):
+                (tdir / name).write_text("x" * 200, encoding="utf-8")
+            barrier = threading.Barrier(2)
+
+            def finalize_once():
+                barrier.wait()
+                try:
+                    cdx.finalize_meta(tdir, {"state": "done"})
+                except OSError:
+                    pass
+
+            worker = threading.Thread(target=finalize_once)
+            worker.start()
+            barrier.wait()
+            result = cdx.remove_task_dir(tdir)
+            worker.join(timeout=1)
+            if tdir.exists():
+                left_behind += 1
+            self.assertIn(result, ("removed", "finalizing"))
+            shutil.rmtree(tdir, ignore_errors=True)
+        self.assertEqual(left_behind, 0, "remove_task_dir left task dirs half-removed under the finalize race")
+
     def test_clean_terminal_is_owner_scoped(self):
         self.fake_bin = str(make_fake_codex(self.base))
         state = self.base / "state"
