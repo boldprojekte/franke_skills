@@ -42,7 +42,7 @@ Pass role files by path. Never read them; they are Codex-facing and cost you not
 
 ## The loop
 
-1. **Spawn.** Write the prompt as a work order. The worker has zero session context, so the work order carries exactly the **delta**: everything the worker needs that is NOT in the codebase. Decisions the user made in this session, constraints you learned, approaches already ruled out, verified facts the worker cannot rediscover. What IS in the codebase gets referenced by path, not repeated as text. And don't write the code in the prompt; you are delegating the typing, not dictating keystrokes. Structure: goal, repo + key paths, constraints ("don't touch X"), non-goals, proof expected (exact test command), output shape. Then:
+1. **Spawn.** Write the prompt as a work order. The worker has zero session context, so the work order carries exactly the **delta**: everything the worker needs that is NOT in the codebase. Decisions the user made in this session, constraints you learned, approaches already ruled out, verified facts the worker cannot rediscover. What IS in the codebase gets referenced by path, not repeated as text. And don't write the code in the prompt; you are delegating the typing, not dictating keystrokes. Structure: goal, repo + key paths, constraints ("don't touch X"), non-goals, proof expected (exact command, scoped to the worker's touched area — the one full-suite run is your own final gate after all tasks merge, never a per-worker proof), output shape. Then:
    ```bash
    python3 $CDX spawn -f prompt.md -C /path/to/repo --json    # returns {task, pid, state} instantly
    ```
@@ -61,7 +61,7 @@ Pass role files by path. Never read them; they are Codex-facing and cost you not
    python3 $CDX result <task> --json    # exit 0 done · 11 awaiting_reply · 13 failed · 10 still working
    ```
    For long tasks, run `result <task> --wait --json` as a background Bash and get notified instead of polling.
-   A result is not an outcome: `git status -sb` + read the full diff in the repo, judge it like a contributor PR, run the proof command yourself. Codex claims are advisory. Done when: the diff is reviewed and the proof ran in your own shell.
+   A result is not an outcome: `git status -sb` + read the full diff in the repo, judge it like a contributor PR. Codex claims are advisory — but the answer to that is evidence, not repetition. The report carries the proof's real output: plausibilize it against the diff instead of re-running it, and re-run the targeted proof only on a suspicion trigger — output missing or vague, output inconsistent with the diff (tests named that don't exist, counts that don't add up), a failed spot-check. Note whether the credited proof is subsumed by your own final gate (the one full-suite run after all tasks merge); non-subsumed proofs are re-run once there, never per collection. Done when: the diff is reviewed and the evidence is credited — or the targeted re-run passed.
 
 ## Acting on states
 

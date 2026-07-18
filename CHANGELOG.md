@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 (2026-07-18)
+
+- End duplicated proof runs in the delegation loop: collection (step 4) now credits the worker's attached proof output instead of re-running the proof command — the diff read stays mandatory, and a targeted re-run happens only on a named suspicion trigger (output missing or vague, inconsistent with the diff, a failed spot-check). Previously worker and orchestrator each ran the same proof, doubling test time per task; on multi-task plans this stacked to hours.
+- Scope the proof itself: the work-order contract (step 1) now asks for a proof scoped to the worker's touched area, and the `general` role's fallback ("the project's standard checks") is replaced by checks scoped to what the worker touched — the one full-suite run is the caller's own final gate after all tasks merge, never a per-worker proof.
+- Close the false-green residue with a subsumption note: at collection, record whether the credited proof is covered by that final gate; non-subsumed proofs (manual checks, benchmarks, external-integration tests) are re-run exactly once there.
+
 ## 0.6.1 (2026-07-15)
 
 - Add `clean -C/--repo <path>`: a targeted reap of a repo's terminal tasks regardless of the cwd they were spawned from. The owner fallback is the spawning cwd, so a task spawned with `-C /repo` from another directory is owned by that directory and a later `clean` from `/repo` would treat it as foreign and leave it behind. `clean -C /repo` reaps it (still terminal-only, still leaves running tasks alone) without the blunt `clean --any-owner`. The skipped-foreign hint now points at both `-C` and `--any-owner`.
