@@ -61,7 +61,9 @@ Pass role files by path. Never read them; they are Codex-facing and cost you not
    python3 $CDX result <task> --json    # exit 0 done · 11 awaiting_reply · 13 failed · 10 still working
    ```
    For long tasks, run `result <task> --wait --json` as a background Bash and get notified instead of polling.
-   A result is not an outcome: `git status -sb` + read the full diff in the repo, judge it like a contributor PR. Codex claims are advisory — but the answer to that is evidence, not repetition. The report carries the proof's real output: plausibilize it against the diff instead of re-running it, and re-run the targeted proof only on a suspicion trigger — output missing or vague, output inconsistent with the diff (tests named that don't exist, counts that don't add up), a failed spot-check. Note whether the credited proof is subsumed by your own final gate (the one full-suite run after all tasks merge); non-subsumed proofs are re-run once there, never per collection. Done when: the diff is reviewed and the evidence is credited — or the targeted re-run passed.
+   A result is not an outcome: `git status -sb` + read the full diff in the repo, judge it like a contributor PR. Codex claims are advisory — but the answer to that is evidence, not repetition. The report carries the proof's real output: plausibilize it against the diff instead of re-running it, and re-run the targeted proof only on a suspicion trigger — output missing or vague, output inconsistent with the diff (tests named that don't exist, counts that don't add up), a failed spot-check. Note whether the credited proof is subsumed by your own final gate (step 5); non-subsumed proofs are re-run once there, never per collection. Done when: the diff is reviewed and the evidence is credited — or the targeted re-run passed.
+
+5. **Close the gate — once, after the last task.** With all tasks merged, run the full-suite gate the per-worker proofs deliberately skipped, plus a one-time re-run of every credited proof noted as not subsumed by it (manual checks, benchmarks, external-integration tests). Done when: the gate ran green and no non-subsumed note is left open.
 
 ## Acting on states
 
