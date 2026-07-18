@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
