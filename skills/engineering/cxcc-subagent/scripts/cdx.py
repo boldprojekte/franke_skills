@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -449,16 +449,18 @@ def meta_backend(meta: dict[str, Any]) -> str:
 
 
 def task_owner() -> str:
-    """Identity that scopes `clean` to the session/worktree that spawned a task.
+    """Identity that scopes `list` and `clean` to the session that spawned a task.
 
     The registry (`~/.codex-agents/tasks`) is shared by every session on the
-    machine, so a blanket `clean --terminal`/`--all` would delete sibling
-    sessions' still-uncollected results. Stamping an owner and scoping clean to
-    it keeps parallel sessions from stepping on each other.
+    machine, so an unscoped `list` drags every sibling session's fleet into each
+    check-in, and a blanket `clean --terminal`/`--all` would delete sibling
+    sessions' still-uncollected results. Stamping an owner and scoping both
+    verbs to it keeps parallel sessions from stepping on each other.
 
-    `CDX_OWNER` (the skill sets it to a stable session id) wins; otherwise the
+    `CDX_OWNER` (the skill mints a stable per-chat slug) wins; otherwise the
     resolved cwd, so parallel *worktrees* get distinct owners with zero config.
-    Two sessions sharing one cwd should set `CDX_OWNER` to stay isolated."""
+    The cwd fallback collides when two sessions share one checkout, which is
+    exactly why the skill sets `CDX_OWNER` unconditionally."""
     override = os.environ.get("CDX_OWNER", "").strip()
     if override:
         return override
@@ -1112,22 +1114,38 @@ def list_tasks(args: argparse.Namespace) -> int:
     root = state_root(args)
     ensure_state(root)
     rows = []
+    skipped_foreign = 0
     cutoff = now() - 24 * 60 * 60
+    # the registry is shared by every session on the machine: scope the default view
+    # to our own tasks (the same owner contract clean follows) so parallel sessions
+    # don't drag each other's fleets into every check-in. --any-owner is the
+    # deliberate machine-wide view; -C/--repo additionally shows tasks targeting
+    # that repo regardless of the cwd they were spawned from.
+    me = task_owner()
+    repo_filter = str(Path(args.repo).expanduser().resolve()) if args.repo else None
     for path in tasks_dir(root).glob("*"):
         if not path.is_dir():
             continue
         row = list_payload(path.name, path)
         meta = load_meta(path)
         terminal = row["state"] in TERMINAL_STATES
-        if args.all or not terminal or float(meta.get("spawned_at") or 0) >= cutoff:
-            rows.append(row)
+        if not (args.all or not terminal or float(meta.get("spawned_at") or 0) >= cutoff):
+            continue
+        mine = args.any_owner or meta.get("owner") == me
+        repo_match = repo_filter is not None and meta.get("repo") == repo_filter
+        if not (mine or repo_match):
+            skipped_foreign += 1
+            continue
+        rows.append(row)
     rows.sort(key=lambda row: (ATTENTION_ORDER.get(row["state"], 4), row["task"]))
     if args.json:
-        json_out(rows)
+        json_out({"tasks": rows, "skipped_foreign": skipped_foreign})
     else:
         for row in rows:
             q = f" question={condense(row['question'])}" if row.get("question") else ""
             print(f"{row['task']} {row['state']} {row['repo']}{q}")
+        if skipped_foreign:
+            print(f"(skipped {skipped_foreign} task(s) owned by other sessions; use --any-owner to see them, or -C <repo> for one repo's tasks)")
     return 0
 
 
@@ -1267,7 +1285,7 @@ def result_task(args: argparse.Namespace) -> int:
         if state != "working" or not args.wait:
             break
         if now() - start >= timeout:
-            raise CdxError(6, f"timeout after {timeout}s waiting for {name}; task keeps running, use cdx peek {name}")
+            raise CdxError(6, f"timeout after {timeout}s waiting for {name}: not a failure, the task keeps running; check cdx status {name} (or list), then re-run result --wait")
         time.sleep(1)
     if payload["state"] == "working":
         eprint("still working; use --wait or peek")
@@ -1590,6 +1608,8 @@ def build_parser() -> argparse.ArgumentParser:
     listing = sub.add_parser("list")
     globals_for(listing)
     listing.add_argument("--all", action="store_true")
+    listing.add_argument("--any-owner", action="store_true", help="include tasks owned by other sessions (default: only your own; foreign tasks surface as a skipped_foreign count)")
+    listing.add_argument("-C", "--repo", help="also show tasks that target this repo, regardless of the cwd they were spawned from")
     listing.set_defaults(func=list_tasks)
 
     status = sub.add_parser("status")
@@ -1609,7 +1629,7 @@ def build_parser() -> argparse.ArgumentParser:
     globals_for(result)
     result.add_argument("task")
     result.add_argument("--wait", action="store_true")
-    result.add_argument("--timeout", type=int, default=3600)
+    result.add_argument("--timeout", type=int, default=600, help="seconds before --wait returns exit 6; the task keeps running, this is a bounded check-in, not a deadline on the task")
     result.set_defaults(func=result_task)
 
     send = sub.add_parser("send")

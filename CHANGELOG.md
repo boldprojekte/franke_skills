@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 (2026-08-03)
+
+- Make `list` owner-scoped like `clean`: by default it shows only the current session's tasks, so a check-in in one chat no longer pulls a parallel chat's fleet into context on every look. Foreign tasks surface as a `skipped_foreign` count; `list --any-owner` is the deliberate machine-wide view and `list -C <repo>` additionally shows that repo's tasks across owners (same escape hatches as `clean`). **Breaking:** `list --json` now emits `{"tasks": [...], "skipped_foreign": N}` instead of a bare array, so the scoping is visible in-band.
+- Make `CDX_OWNER` doctrine instead of a footnote: the SKILL.md setup block now mints a stable per-chat slug unconditionally. The cwd fallback isolates separate worktrees but silently collides when two chats sit in the same checkout — in that case `clean --terminal` in one chat could reap the other chat's uncollected results, and `list` mixed both fleets. The `task_owner` docstring claimed the skill sets a session id; it never did until now.
+- Bound the collect wait: `result --wait` drops its default `--timeout` from 3600 to 600 seconds, and SKILL.md step 4 makes the background `result --wait` + exit-6-as-check-in the doctrine for long tasks. A lost completion notification previously meant up to an hour of silent staleness; now the wait resolves within 10 minutes no matter what, and exit 6 explicitly routes into `list` + re-arm instead of reading as a failure. Escalated questions still return immediately; the timeout only affects the still-`working` case.
+
 ## 0.6.2 (2026-07-18)
 
 - End duplicated proof runs in the delegation loop: collection (step 4) now credits the worker's attached proof output instead of re-running the proof command — the diff read stays mandatory, and a targeted re-run happens only on a named suspicion trigger (output missing or vague, inconsistent with the diff, a failed spot-check). Previously worker and orchestrator each ran the same proof, doubling test time per task; on multi-task plans this stacked to hours.

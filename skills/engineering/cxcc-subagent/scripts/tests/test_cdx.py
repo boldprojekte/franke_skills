@@ -513,9 +513,10 @@ class CliSubprocessTests(TempCase):
         listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
         self.assertEqual(listing.returncode, 0, listing.stderr)
         listing_data = self.assert_json_stdout(listing)
-        self.assertIsInstance(listing_data, list)
-        self.assertEqual(listing_data[0]["model"], "gpt-5.6-sol")
-        self.assertEqual(listing_data[0]["provider_effort"], "medium")
+        self.assertIsInstance(listing_data, dict)
+        tasks = listing_data["tasks"]
+        self.assertEqual(tasks[0]["model"], "gpt-5.6-sol")
+        self.assertEqual(tasks[0]["provider_effort"], "medium")
 
         peek = self.run_cdx(["peek", "--json", "--state-dir", str(state), "cli-task"], env=env)
         self.assertEqual(peek.returncode, 0, peek.stderr)
@@ -918,14 +919,40 @@ class OwnerScopingTests(TempCase):
         self.assertEqual(sorted(data["removed"]), ["alice-one", "alice-two"])
         self.assertEqual(data["skipped_foreign"], 1)
 
-        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env={"CDX_CODEX_BIN": self.fake_bin})
-        remaining = json.loads(listing.stdout)
+        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin})
+        remaining = json.loads(listing.stdout)["tasks"]
         self.assertEqual([t["task"] for t in remaining], ["bob-one"])
         self.assertEqual(remaining[0]["owner"], "bob")
 
         # --any-owner is the deliberate global sweep
         clean_any = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--terminal", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"})
         self.assertEqual(json.loads(clean_any.stdout)["removed"], ["bob-one"])
+
+    def test_list_is_owner_scoped(self):
+        # two chats sharing one machine: each session's list shows only its own fleet,
+        # foreign tasks surface as a count, --any-owner is the deliberate global view
+        self.fake_bin = str(make_fake_codex(self.base))
+        state = self.base / "state"
+        repo = self.git_repo("repo")
+        other_repo = self.git_repo("other-repo")
+        self.spawn_done(state, repo, "alice-one", "alice")
+        self.spawn_done(state, other_repo, "bob-one", "bob")
+
+        as_alice = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"}
+        scoped = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=as_alice)
+        self.assertEqual(scoped.returncode, 0, scoped.stderr)
+        data = json.loads(scoped.stdout)
+        self.assertEqual([t["task"] for t in data["tasks"]], ["alice-one"])
+        self.assertEqual(data["skipped_foreign"], 1)
+
+        global_view = json.loads(self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "--any-owner"], env=as_alice).stdout)
+        self.assertEqual(sorted(t["task"] for t in global_view["tasks"]), ["alice-one", "bob-one"])
+        self.assertEqual(global_view["skipped_foreign"], 0)
+
+        # -C <repo> pulls in that repo's tasks across owners, on top of your own
+        repo_view = json.loads(self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "-C", str(other_repo)], env=as_alice).stdout)
+        self.assertEqual(sorted(t["task"] for t in repo_view["tasks"]), ["alice-one", "bob-one"])
+        self.assertEqual(repo_view["skipped_foreign"], 0)
 
     def test_clean_repo_filter_reaps_across_owners(self):
         # a task spawned with -C for a repo, under a different owner (e.g. a different
@@ -1020,7 +1047,7 @@ class OwnerScopingTests(TempCase):
             self.assertFalse(runner_dir.exists(), "killed+cleaned task dir was resurrected")
             time.sleep(0.2)
         listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
-        self.assertEqual(json.loads(listing.stdout), [])
+        self.assertEqual(json.loads(listing.stdout), {"tasks": [], "skipped_foreign": 0})
 
 
 if __name__ == "__main__":

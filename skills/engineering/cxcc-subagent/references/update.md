@@ -45,8 +45,12 @@ An update overwrites `scripts/cdx.py` in place. Already-running helpers keep the
 loaded code, but avoid mixing versions mid-flight:
 
 ```bash
-python3 <installed-dir>/scripts/cdx.py list --json   # any non-terminal task → ask the user before proceeding
+python3 <installed-dir>/scripts/cdx.py list --json --any-owner   # any non-terminal task → ask the user before proceeding
 ```
+
+`--any-owner` matters here: the update swaps `scripts/cdx.py` for every session on the
+machine, so a parallel chat's running task blocks the update just as much as your own
+(a plain `list` would hide it).
 
 Apply by replacing the installed copy with the fetched one (preserve the directory
 path itself, replace its contents), then clean up `$TMP`.

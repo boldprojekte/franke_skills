@@ -13,7 +13,10 @@ The CLI is `scripts/cdx.py` inside this skill folder; it runs from any cwd and n
 SKILL_DIR=<this skill's base directory, announced when the skill loads>
 CDX="$SKILL_DIR/scripts/cdx.py"
 ROLES="$SKILL_DIR/references/roles"
+export CDX_OWNER=<stable slug for this chat, minted once, e.g. chat-payments-a3>
 ```
+
+`CDX_OWNER` is this chat's identity in the machine-shared task registry: it is what scopes `list` and `clean` to your own tasks (see Housekeeping). Mint one slug at first use and keep it for the whole conversation. Shell state does not persist between Bash calls, so re-declare all four lines in every call that touches cdx; a call without `CDX_OWNER` falls back to the cwd as owner, which collides with any parallel chat sitting in the same directory.
 
 Every verb takes `--json`. Use it always; stdout is pure JSON, diagnostics go to stderr. Exit codes: 0 ok · 2 usage · 3 not found · 4 invalid state · 5 backend/internal · 6 timeout · 7 binary missing · 10 working · 11 awaiting_reply · 12 stalled · 13 failed/killed. Caveat: `12` only comes from `status`/`peek`; `result` collapses a stalled task into `13`, so read the JSON `state` field, not the exit code, when you need to tell stalled from failed. If a JSON field is genuinely unclear, the source of truth is `scripts/cdx.py`.
 
@@ -54,13 +57,14 @@ Pass role files by path. Never read them; they are Codex-facing and cost you not
    ```bash
    python3 $CDX list --json    # attention-first: awaiting_reply / failed / stalled sort to the top
    ```
+   `list` shows only this session's tasks; parallel chats' tasks appear solely as a `skipped_foreign` count, so they never leak into your check-ins (scoping details in Housekeeping).
    Done when: every task is accounted for: `working` tasks left alone, everything else acted on (below).
 
 4. **Collect and verify.**
    ```bash
    python3 $CDX result <task> --json    # exit 0 done · 11 awaiting_reply · 13 failed · 10 still working
    ```
-   For long tasks, run `result <task> --wait --json` as a background Bash and get notified instead of polling.
+   For long tasks, run `result <task> --wait --json` as a background Bash and get woken instead of polling. The wait returns the moment the task leaves `working` (an escalated question comes back immediately, never delayed), and after 10 minutes (`--timeout`, default 600) it exits 6 with the task still running. Exit 6 is a bounded check-in, not a failure: run `list --json`, act on states, and start a fresh background `result --wait` if everything is still `working`. This bounds how stale you can get when a completion notification is lost — never sit on an unbounded wait. With several tasks in flight, hold the wait on one pacing task only; the check-in's `list` covers the whole fleet.
    A result is not an outcome: `git status -sb` + read the full diff in the repo, judge it like a contributor PR. Codex claims are advisory — but the answer to that is evidence, not repetition. The report carries the proof's real output: plausibilize it against the diff instead of re-running it, and re-run the targeted proof only on a suspicion trigger — output missing or vague, output inconsistent with the diff (tests named that don't exist, counts that don't add up), a failed spot-check. Note whether the credited proof is subsumed by your own final gate (step 5); non-subsumed proofs are re-run once there, never per collection. Done when: the diff is reviewed and the evidence is credited — or the targeted re-run passed.
 
 5. **Close the gate — once, after the last task.** With all tasks merged, run the full-suite gate the per-worker proofs deliberately skipped, plus a one-time re-run of every credited proof noted as not subsumed by it (manual checks, benchmarks, external-integration tests). Done when: the gate ran green and no non-subsumed note is left open.
@@ -132,6 +136,6 @@ Machine-level defaults live in `cdx config` (self-describing via `--help`); touc
 
 `python3 $CDX doctor` before first use of a session if anything smells off (binary, state dir, orphans). `python3 $CDX clean --terminal` once results are harvested: a lean task list keeps `list` readable.
 
-The task registry is shared by every session on the machine, so `clean` is **owner-scoped**: `--terminal`/`--all` only touch tasks this session spawned, leaving a parallel session's uncollected results alone. Each task's `owner` is `CDX_OWNER` if set, else the cwd it was spawned from, so separate worktrees are isolated automatically; export a stable `CDX_OWNER` (e.g. a session id) if two sessions share one cwd, or if you spawn with `-C` for a repo you are not currently sitting in (the owner is the spawning cwd, not the `-C` target, and `clean` matches on its own cwd). `clean --any-owner` restores the global sweep and is the only way to reap pre-owner legacy tasks: use it deliberately, only when you know no sibling session has results in flight. `clean -C <repo>` is the targeted escape hatch when you spawned tasks with `-C` for a repo you were not sitting in: it reaps that repo's terminal tasks whatever cwd they were spawned from, without the blunt `--any-owner`. `clean` only removes tasks that are already terminal. A running (or still-starting) task is never deleted (`clean --task` on one errors, `--all` reports it as skipped), so kill it first (`cdx kill <task>`) if you really want it gone, the same rule `send` follows.
+The task registry is shared by every session on the machine, so `list` and `clean` are **owner-scoped**: by default they see and touch only tasks stamped with this session's owner (`CDX_OWNER` from the setup block; the fallback is the spawning cwd, which isolates separate worktrees automatically but collides when two chats share one checkout — that is why the export is unconditional). Foreign tasks surface only as a `skipped_foreign` count. Both verbs share two escape hatches: `--any-owner` is the deliberate machine-wide view/sweep — on `list` it answers "what else is running on this machine", on `clean` use it only when you know no sibling session has results in flight (it is also the only way to reap pre-owner legacy tasks). `-C <repo>` additionally covers that repo's tasks across owners — needed when tasks were spawned with `-C` from a different directory (the owner is the spawning cwd, not the `-C` target). `clean` only removes tasks that are already terminal. A running (or still-starting) task is never deleted (`clean --task` on one errors, `--all` reports it as skipped), so kill it first (`cdx kill <task>`) if you really want it gone, the same rule `send` follows.
 
 When the user asks to update this skill, read references/update.md and follow it: it fetches the latest published version, shows the user what changed, and applies it safely.
