@@ -10,7 +10,7 @@ The first skill, `cxcc-subagent`, wraps Codex CLI, Claude Code, and Grok Build C
 
 Three things you don't get from spawning a raw coding CLI in a loop:
 
-1. **A stuck run comes back as state, not silence.** A watchdog reaps true hangs, and when a worker needs input it surfaces as an explicit `awaiting_reply` instead of dying quietly in a log. The orchestrator polls attention-first: `awaiting_reply` / `failed` / `stalled` sort to the top.
+1. **A stuck run comes back as state, not silence.** A watchdog reports a worker that has gone quiet — flagged, still running, yours to judge — and only kills at a far later hard limit, because it cannot tell a hang from an eight-minute test run. When a worker needs input it surfaces as an explicit `awaiting_reply` instead of dying quietly in a log. `watch` streams every state change to the orchestrator as it happens, with a heartbeat while work is in flight, so nothing depends on the orchestrator remembering to poll; an explicit look is attention-first (`awaiting_reply` / `failed` / `stalled` sort to the top).
 2. **Three backends, one interface.** Codex CLI (`codex exec --json`), Claude Code (`claude -p --output-format stream-json`), and Grok Build CLI (`grok --prompt-file --output-format streaming-json`) run through the same verbs. Pick the workhorse per task; the orchestrator doesn't change.
 3. **Review is built in, not improvised.** Composable role prompts include two-axis code review, against repo standards and against the spec the change was built from, run in parallel and adjudicated.
 
@@ -49,12 +49,23 @@ ROLES=".agents/skills/cxcc-subagent/references/roles"
 # 1. Spawn a worker from a role + a work order - returns instantly, runs detached
 python3 $CDX spawn -f $ROLES/general.md -f task.md -C /path/to/repo --json
 
-# 2. Go do other things. The run stays alive across everything short of a machine restart.
+# 2a. Push: arm the event stream once per session - one line per state change,
+#     plus a heartbeat while anything is working, scoped to this session's
+#     tasks. Runs until stopped. Needs a harness that can turn a line from a
+#     background process into a new turn (Claude Code: Monitor).
+python3 $CDX watch --json
 
-# 3. Check in at natural pauses - attention-first, not on a poll loop
+# 2b. Pull: or block in one finite call and act on what comes back. Same events,
+#     same scoping, for harnesses without a push path. Always exit 0, never
+#     touches a worker; call it again while work is in flight.
+python3 $CDX wait --timeout 600 --json
+
+# 3. Go do other things. The run stays alive across everything short of a machine restart.
+
+# 4. Take an explicit look whenever you want one - attention-first
 python3 $CDX list --json
 
-# 4. Collect, then verify it yourself: read the diff, run the proof command
+# 5. Collect, then verify it yourself: read the diff, run the proof command
 python3 $CDX result <task> --json
 ```
 

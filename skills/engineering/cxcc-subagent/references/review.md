@@ -37,7 +37,7 @@ Reviewers are read-only by role instruction; they read the standards/spec files 
 
 ## 4. Collect
 
-`result --wait --json` for each (background Bash for long diffs). A valid report ends with a `FINDINGS:` line — a completion sentinel proving the detached run finished and wasn't truncated, not a count you parse. If it's missing, `send` once asking for the report in the specified format.
+`result --json` for each once the watcher reports it left `working` (both axes run in parallel, so expect two `change` lines). A valid report ends with a `FINDINGS:` line — a completion sentinel proving the detached run finished and wasn't truncated, not a count you parse. If it's missing, `send` once asking for the report in the specified format.
 
 ## 5. Adjudicate: never skipped
 

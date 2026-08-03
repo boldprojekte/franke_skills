@@ -20,6 +20,21 @@ assert spec.loader is not None
 spec.loader.exec_module(cdx)
 
 
+def base_env(extra=None):
+    """Subprocess env with any ambient harness session id stripped.
+
+    cdx derives a task owner from the harness's session id, and the test runner is
+    itself running inside a harness. Inheriting that would hand every test the same
+    owner and quietly hide the very fallbacks these tests pin down."""
+    env = os.environ.copy()
+    env.pop("CDX_OWNER", None)
+    for name, _ in cdx.HARNESS_SESSION_ENV:
+        env.pop(name, None)
+    if extra:
+        env.update(extra)
+    return env
+
+
 class TempCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -413,9 +428,7 @@ def make_fake_codex(path: Path) -> Path:
 
 class WatchdogTests(TempCase):
     def run_cdx(self, args, env=None, cwd=None):
-        full_env = os.environ.copy()
-        if env:
-            full_env.update(env)
+        full_env = base_env(env)
         return subprocess.run(
             [sys.executable, str(CDX), *args],
             cwd=cwd or self.base,
@@ -425,7 +438,20 @@ class WatchdogTests(TempCase):
             env=full_env,
         )
 
-    def test_watchdog_marks_fake_process_stalled(self):
+    def poll_until(self, state, task, predicate, env, timeout=90):
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            last = self.run_cdx(["status", "--json", "--state-dir", str(state), task], env=env)
+            data = json.loads(last.stdout)
+            if predicate(data):
+                return last, data
+            time.sleep(0.5)
+        self.fail(f"condition never held; last={last.returncode if last else None} {last.stdout if last else ''} {last.stderr if last else ''}")
+
+    def test_quiet_worker_is_reported_not_killed(self):
+        # the watchdog cannot tell a hang from a worker inside a long test run, so
+        # the soft threshold only raises a flag: the process keeps going untouched
         fake = make_fake_codex(self.base)
         state = self.base / "state"
         repo = self.base / "repo"
@@ -433,24 +459,41 @@ class WatchdogTests(TempCase):
         subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
         env = {"CDX_CODEX_BIN": str(fake)}
         spawn = self.run_cdx(
-            ["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "stall-test", "--stall-after", "1", "STALL_MODE"],
+            ["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "quiet-test", "--stall-after", "2", "--hard-kill-after", "0", "STALL_MODE"],
             env=env,
         )
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
-        json.loads(spawn.stdout)
-        deadline = time.time() + 90
-        last = None
-        stalled = False
-        while time.time() < deadline:
-            last = self.run_cdx(["status", "--json", "--state-dir", str(state), "stall-test"], env=env)
-            data = json.loads(last.stdout)
-            if data["state"] == "stalled":
-                self.assertEqual(last.returncode, 12)
-                stalled = True
-                break
-            time.sleep(0.5)
-        if not stalled:
-            self.fail(f"task did not stall; last={last.returncode if last else None} {last.stdout if last else ''} {last.stderr if last else ''}")
+        status, data = self.poll_until(state, "quiet-test", lambda d: d["stall_suspect"], env)
+        self.assertEqual(data["state"], "working")
+        self.assertEqual(status.returncode, 10)
+        self.assertTrue(data["pid_alive"], "the worker was killed even though only the soft threshold was set")
+        self.assertGreaterEqual(data["quiet_for_s"], 2)
+        # and it stays alive: the flag is a report, not a delayed kill
+        time.sleep(5)
+        still = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "quiet-test"], env=env).stdout)
+        self.assertEqual((still["state"], still["pid_alive"]), ("working", True))
+        self.run_cdx(["kill", "--json", "--state-dir", str(state), "quiet-test"], env=env)
+
+    def test_hard_limit_still_kills_and_stays_resumable(self):
+        fake = make_fake_codex(self.base)
+        state = self.base / "state"
+        repo = self.base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        env = {"CDX_CODEX_BIN": str(fake)}
+        spawn = self.run_cdx(
+            ["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "stall-test", "--stall-after", "1", "--hard-kill-after", "4", "STALL_MODE"],
+            env=env,
+        )
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        # the soft flag comes first, the kill only at the separate hard limit
+        _, flagged = self.poll_until(state, "stall-test", lambda d: d["stall_suspect"], env)
+        self.assertEqual(flagged["state"], "working")
+        last, data = self.poll_until(state, "stall-test", lambda d: d["state"] == "stalled", env)
+        self.assertEqual(last.returncode, 12)
+        self.assertIn("hard limit", data["stall_reason"])
+        # a killed task is no longer a live suspect
+        self.assertFalse(data["stall_suspect"])
         # stalled tasks resume via plain send — no --now gate (SKILL.md: `send "continue"`)
         send = self.run_cdx(["send", "--json", "--state-dir", str(state), "stall-test", "continue"], env=env)
         self.assertEqual(send.returncode, 0, send.stderr)
@@ -461,9 +504,7 @@ class WatchdogTests(TempCase):
 
 class CliSubprocessTests(TempCase):
     def run_cdx(self, args, env=None, cwd=None):
-        full_env = os.environ.copy()
-        if env:
-            full_env.update(env)
+        full_env = base_env(env)
         return subprocess.run(
             [sys.executable, str(CDX), *args],
             cwd=cwd or (self.base / "other"),
@@ -677,9 +718,7 @@ class CliSubprocessTests(TempCase):
 
 class RealBackendSmokeTests(TempCase):
     def run_cdx(self, args, env=None, cwd=None, timeout=120):
-        full_env = os.environ.copy()
-        if env:
-            full_env.update(env)
+        full_env = base_env(env)
         return subprocess.run(
             [sys.executable, str(CDX), *args],
             cwd=cwd or self.base,
@@ -838,9 +877,7 @@ class RealBackendSmokeTests(TempCase):
 
 class OwnerScopingTests(TempCase):
     def run_cdx(self, args, env=None, cwd=None):
-        full_env = os.environ.copy()
-        if env:
-            full_env.update(env)
+        full_env = base_env(env)
         return subprocess.run(
             [sys.executable, str(CDX), *args],
             cwd=cwd or self.base,
@@ -1048,6 +1085,309 @@ class OwnerScopingTests(TempCase):
             time.sleep(0.2)
         listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
         self.assertEqual(json.loads(listing.stdout), {"tasks": [], "skipped_foreign": 0})
+
+
+def row(task, state, **extra):
+    base = {"task": task, "state": state, "backend": "codex", "repo": "/repo", "age_s": 10, "last_output_age_s": 1, "last_activity": None, "question": None}
+    base.update(extra)
+    return base
+
+
+class WatchStateTests(unittest.TestCase):
+    """The transition and heartbeat rules `watch` streams, driven by a fake clock."""
+
+    def test_arming_snapshot_then_silence(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        events = tracker.step([row("a", "working")], 0, 0.0)
+        self.assertEqual([e["event"] for e in events], ["armed"])
+        # names and states only: the caller spawned these, it knows the rest
+        self.assertEqual(events[0]["tasks"], {"a": "working"})
+        # no change and no heartbeat due: nothing at all
+        self.assertEqual(tracker.step([row("a", "working")], 0, 15.0), [])
+
+    def test_change_out_of_working_is_one_event(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working")], 0, 0.0)
+        events = tracker.step([row("a", "done")], 0, 15.0)
+        self.assertEqual([e["event"] for e in events], ["change"])
+        self.assertEqual((events[0]["previous_state"], events[0]["state"]), ("working", "done"))
+        # the same state is not re-announced on every poll
+        self.assertEqual(tracker.step([row("a", "done")], 0, 30.0), [])
+
+    def test_escalated_question_rides_along_with_the_change(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working")], 0, 0.0)
+        events = tracker.step([row("a", "awaiting_reply", question="Which schema should I use?")], 0, 15.0)
+        self.assertEqual(events[0]["question"], "Which schema should I use?")
+
+    def test_fresh_spawn_is_seeded_silently_but_a_new_terminal_task_is_not(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([], 0, 0.0)
+        # our own spawn: the orchestrator just made this happen, it is not news
+        self.assertEqual(tracker.step([row("a", "working")], 0, 15.0), [])
+        # a task that appears already terminal (e.g. it finished between two polls) is
+        events = tracker.step([row("a", "working"), row("b", "failed")], 0, 30.0)
+        self.assertEqual([(e["task"], e["state"]) for e in events], [("b", "failed")])
+
+    def test_cleaned_task_disappearing_is_not_an_event(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working"), row("b", "done")], 0, 0.0)
+        self.assertEqual(tracker.step([row("a", "working")], 0, 15.0), [])
+        self.assertNotIn("b", tracker.seen)
+
+    def test_heartbeat_ticks_only_while_something_works(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working")], 0, 0.0)
+        self.assertEqual(tracker.step([row("a", "working")], 0, 599.0), [])
+        beat = tracker.step([row("a", "working")], 0, 600.0)
+        self.assertEqual([e["event"] for e in beat], ["heartbeat"])
+        # a sketch, not rows: one string per task, nothing the caller already holds
+        self.assertEqual(beat[0]["working"], ["a working 10s"])
+        self.assertNotIn("uncollected", beat[0])
+        # uncollected results ride along, so a lost change event still resurfaces
+        tracker.step([row("a", "working"), row("b", "done")], 0, 601.0)
+        beat = tracker.step([row("a", "working"), row("b", "done")], 0, 1300.0)
+        self.assertEqual(beat[0]["uncollected"], ["b done 10s"])
+
+    def test_heartbeat_stops_when_nothing_is_working(self):
+        # an idle session has no chat to keep awake: silence is correct there
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "done")], 0, 0.0)
+        self.assertEqual(tracker.step([row("a", "done")], 0, 5000.0), [])
+
+    def test_a_change_resets_the_heartbeat_timer(self):
+        # a change line wakes the session just as well as a heartbeat, so it counts
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working"), row("b", "working")], 0, 0.0)
+        self.assertEqual([e["event"] for e in tracker.step([row("a", "working"), row("b", "done")], 0, 590.0)], ["change"])
+        self.assertEqual(tracker.step([row("a", "working"), row("b", "done")], 0, 900.0), [])
+        self.assertEqual([e["event"] for e in tracker.step([row("a", "working"), row("b", "done")], 0, 1190.0)], ["heartbeat"])
+
+    def test_quiet_flag_and_recovery_are_their_own_events(self):
+        # the task never leaves `working`, so a plain state diff would miss both
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working")], 0, 0.0)
+        flagged = tracker.step([row("a", "working", stall_suspect=True, quiet_for_s=300)], 0, 15.0)
+        self.assertEqual([e["event"] for e in flagged], ["stall_suspect"])
+        self.assertEqual(flagged[0]["quiet_for_s"], 300)
+        # a standing suspicion is not re-announced on every poll
+        self.assertEqual(tracker.step([row("a", "working", stall_suspect=True)], 0, 30.0), [])
+        self.assertEqual([e["event"] for e in tracker.step([row("a", "working")], 0, 45.0)], ["recovered"])
+
+    def test_a_suspect_that_finishes_reports_the_state_change_only(self):
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working", stall_suspect=True)], 0, 0.0)
+        events = tracker.step([row("a", "done")], 0, 15.0)
+        self.assertEqual([(e["event"], e["state"]) for e in events], [("change", "done")])
+
+    def test_the_heartbeat_marks_a_quiet_task_inline(self):
+        # a standing suspicion has to stay visible without being its own entry
+        tracker = cdx.WatchState(heartbeat=600)
+        tracker.step([row("a", "working", stall_suspect=True, quiet_for_s=320)], 0, 0.0)
+        beat = tracker.step([row("a", "working", stall_suspect=True, quiet_for_s=320)], 0, 600.0)
+        self.assertEqual(beat[0]["working"], ["a working 10s quiet 5m"])
+
+    def test_heartbeat_zero_disables_the_tick(self):
+        tracker = cdx.WatchState(heartbeat=0)
+        tracker.step([row("a", "working")], 0, 0.0)
+        self.assertEqual(tracker.step([row("a", "working")], 0, 100000.0), [])
+
+
+class WatchCliTests(TempCase):
+    def run_cdx(self, args, env=None, cwd=None):
+        full_env = base_env(env)
+        return subprocess.run([sys.executable, str(CDX), *args], cwd=cwd or self.base, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=full_env)
+
+    def test_watch_streams_a_change_and_is_owner_scoped(self):
+        fake = make_fake_codex(self.base)
+        state = self.base / "state"
+        repo = self.base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        env = base_env({"CDX_CODEX_BIN": str(fake), "CDX_OWNER": "alice"})
+
+        # a foreign session's task must never show up in alice's stream
+        self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "bob-task", "hello"], env={"CDX_CODEX_BIN": str(fake), "CDX_OWNER": "bob"})
+        spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "alice-task", "--stall-after", "120", "STALL_MODE"], env={"CDX_CODEX_BIN": str(fake), "CDX_OWNER": "alice"})
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+        # let the task actually get going: the supervisor's startup write would
+        # otherwise clobber a state we stamp in the same breath as the spawn
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "alice-task"], env={"CDX_CODEX_BIN": str(fake)}).stdout)["output_bytes"]:
+                break
+            time.sleep(0.2)
+
+        watcher = subprocess.Popen(
+            [sys.executable, str(CDX), "watch", "--json", "--state-dir", str(state), "--interval", "1", "--heartbeat", "0"],
+            cwd=self.base,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            armed = json.loads(watcher.stdout.readline())
+            self.assertEqual(armed["event"], "armed")
+            self.assertEqual(list(armed["tasks"]), ["alice-task"])
+            self.assertEqual(armed["skipped_foreign"], 1)
+
+            # the line arrives on its own, without the watcher exiting: that is the
+            # whole point of the verb (a wake per event, not a wake per process death)
+            self.assertIsNone(watcher.poll())
+            self.run_cdx(["kill", "--json", "--state-dir", str(state), "alice-task"], env={"CDX_CODEX_BIN": str(fake)})
+            change = json.loads(watcher.stdout.readline())
+            self.assertEqual(change["event"], "change")
+            self.assertEqual(change["task"], "alice-task")
+            self.assertEqual(change["state"], "killed")
+            self.assertIsNone(watcher.poll(), "watch exited after an event instead of staying armed")
+        finally:
+            watcher.terminate()
+            watcher.communicate(timeout=10)
+
+    def test_result_wait_timeout_is_still_working_not_an_error(self):
+        fake = make_fake_codex(self.base)
+        state = self.base / "state"
+        repo = self.base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        env = {"CDX_CODEX_BIN": str(fake)}
+        spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "slow-task", "--stall-after", "120", "STALL_MODE"], env=env)
+        self.assertEqual(spawn.returncode, 0, spawn.stderr)
+
+        result = self.run_cdx(["result", "--json", "--state-dir", str(state), "slow-task", "--wait", "--timeout", "2"], env=env)
+        # exit 10 (still working), a real JSON payload on stdout, and nothing that
+        # reads as "the agent died and needs resuming"
+        self.assertEqual(result.returncode, 10, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["state"], "working")
+        self.assertEqual(data["reason"], "timeout")
+        self.assertGreaterEqual(data["waited_s"], 2)
+        self.assertNotIn("error", result.stderr)
+        # and the task itself was not touched by the expiry
+        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "slow-task"], env=env)
+        self.assertEqual(json.loads(status.stdout)["state"], "working")
+        self.run_cdx(["kill", "--json", "--state-dir", str(state), "slow-task"], env=env)
+
+    def test_result_without_wait_reports_working_as_json(self):
+        fake = make_fake_codex(self.base)
+        state = self.base / "state"
+        repo = self.base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        env = {"CDX_CODEX_BIN": str(fake)}
+        self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "slow-task", "--stall-after", "120", "STALL_MODE"], env=env)
+        result = self.run_cdx(["result", "--json", "--state-dir", str(state), "slow-task"], env=env)
+        self.assertEqual(result.returncode, 10, result.stderr)
+        # --json used to promise pure JSON on stdout and then print nothing here
+        data = json.loads(result.stdout)
+        self.assertEqual((data["state"], data["reason"]), ("working", "no_wait"))
+        self.run_cdx(["kill", "--json", "--state-dir", str(state), "slow-task"], env=env)
+
+
+class WaitCliTests(TempCase):
+    def run_cdx(self, args, env=None, cwd=None):
+        full_env = base_env(env)
+        return subprocess.run([sys.executable, str(CDX), *args], cwd=cwd or self.base, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=full_env)
+
+    def setup_repo(self):
+        self.fake = str(make_fake_codex(self.base))
+        self.state = self.base / "state"
+        repo = self.base / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        return repo
+
+    def test_wait_returns_on_the_change_with_the_whole_fleet(self):
+        repo = self.setup_repo()
+        env = {"CDX_CODEX_BIN": self.fake, "CDX_OWNER": "alice"}
+        self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "alice-task", "--stall-after", "120", "STALL_MODE"], env=env)
+        # a foreign session's task must not be able to end alice's wait
+        self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "bob-task", "hello"], env={"CDX_CODEX_BIN": self.fake, "CDX_OWNER": "bob"})
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env={"CDX_CODEX_BIN": self.fake}).stdout)["output_bytes"]:
+                break
+            time.sleep(0.2)
+
+        killer = subprocess.Popen([sys.executable, "-c", f"import subprocess,sys,time; time.sleep(3); subprocess.run([sys.executable, {str(CDX)!r}, 'kill', '--json', '--state-dir', {str(self.state)!r}, 'alice-task'])"], env={**os.environ, "CDX_CODEX_BIN": self.fake})
+        try:
+            wait = self.run_cdx(["wait", "--json", "--state-dir", str(self.state), "--timeout", "60", "--interval", "1"], env=env)
+        finally:
+            killer.wait(timeout=30)
+        self.assertEqual(wait.returncode, 0, wait.stderr)
+        data = json.loads(wait.stdout)
+        self.assertEqual(data["reason"], "change")
+        self.assertEqual([(e["task"], e["state"]) for e in data["events"]], [("alice-task", "killed")])
+        # the events are the news; the fleet is context the caller already holds,
+        # so a change carries only what is still running (here: nothing)
+        self.assertEqual(data["working"], [])
+        self.assertNotIn("tasks", data)
+        self.assertEqual(data["skipped_foreign"], 1)
+        # and no field on the event repeats what the caller chose at spawn
+        self.assertEqual(set(data["events"][0]) - {"event", "previous_state", "task", "state", "age_s", "last_activity"}, set())
+
+    def test_wait_expiry_is_exit_zero_and_leaves_the_task_running(self):
+        repo = self.setup_repo()
+        env = {"CDX_CODEX_BIN": self.fake, "CDX_OWNER": "alice"}
+        self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "alice-task", "--stall-after", "120", "STALL_MODE"], env=env)
+        wait = self.run_cdx(["wait", "--json", "--state-dir", str(self.state), "--timeout", "2", "--interval", "1"], env=env)
+        # the whole point: an expiry is a check-in, not an error and not a kill
+        self.assertEqual(wait.returncode, 0, wait.stderr)
+        data = json.loads(wait.stdout)
+        self.assertEqual(data["reason"], "timeout")
+        # nothing moved, so there is nothing to report but the shape of the fleet
+        self.assertEqual(len(data["working"]), 1)
+        self.assertTrue(data["working"][0].startswith("alice-task working "), data["working"])
+        self.assertNotIn("events", data)
+        self.assertEqual(json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"], "working")
+        self.run_cdx(["kill", "--json", "--state-dir", str(self.state), "alice-task"], env=env)
+
+    def test_wait_with_nothing_running_returns_at_once(self):
+        # otherwise a caller that loops on wait blocks for ten minutes after the
+        # last task finished, or spins on an always-ready wait
+        repo = self.setup_repo()
+        env = {"CDX_CODEX_BIN": self.fake, "CDX_OWNER": "alice"}
+        self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "alice-task", "hello"], env=env)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"] == "done":
+                break
+            time.sleep(0.2)
+        start = time.time()
+        wait = self.run_cdx(["wait", "--json", "--state-dir", str(self.state), "--timeout", "600"], env=env)
+        self.assertLess(time.time() - start, 15)
+        data = json.loads(wait.stdout)
+        self.assertEqual(data["reason"], "idle")
+        self.assertEqual([t["state"] for t in data["tasks"]], ["done"])
+
+
+class OwnerFallbackTests(TempCase):
+    def test_precedence_explicit_then_harness_then_cwd(self):
+        cwd = str(Path.cwd().resolve())
+        for env, expected in (
+            ({"CDX_OWNER": "chat-slug", "CODEX_THREAD_ID": "thread-9"}, "chat-slug"),
+            ({"CODEX_THREAD_ID": "thread-9"}, "codex:thread-9"),
+            ({"CLAUDE_CODE_SESSION_ID": "sess-7"}, "claude:sess-7"),
+            # harness ids are namespaced, so they can never look like a path or a slug
+            ({"CODEX_THREAD_ID": "thread-9", "CLAUDE_CODE_SESSION_ID": "sess-7"}, "codex:thread-9"),
+            ({}, cwd),
+            # blank is not an identity: fall through instead of owning ""
+            ({"CDX_OWNER": "  ", "CODEX_THREAD_ID": "thread-9"}, "codex:thread-9"),
+            ({"CDX_OWNER": "", "CODEX_THREAD_ID": ""}, cwd),
+        ):
+            with self.subTest(env=env):
+                saved = {key: os.environ.get(key) for key in ("CDX_OWNER", *(name for name, _ in cdx.HARNESS_SESSION_ENV))}
+                try:
+                    for key in saved:
+                        os.environ.pop(key, None)
+                    os.environ.update(env)
+                    self.assertEqual(cdx.task_owner(), expected)
+                finally:
+                    for key, value in saved.items():
+                        os.environ.pop(key, None)
+                        if value is not None:
+                            os.environ[key] = value
 
 
 if __name__ == "__main__":

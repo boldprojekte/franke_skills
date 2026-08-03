@@ -18,11 +18,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
 TURN_STARTUP_GRACE_S = 15
+# session ids a harness exports for its own conversation, best owner fallback
+# after an explicit CDX_OWNER: stable for the whole session, zero config
+HARNESS_SESSION_ENV = (("CODEX_THREAD_ID", "codex"), ("CLAUDE_CODE_SESSION_ID", "claude"))
 CDX_EFFORTS = ("medium", "high", "max")
 CODEX_DEFAULT_MODEL = "sol"
 CODEX_MODEL_ALIASES = {
@@ -339,7 +342,10 @@ def eprint(message: str) -> None:
 
 
 def json_out(data: Any) -> None:
+    # flush per line: `watch` streams into a consumer that turns each line into a
+    # notification, and block buffering on a pipe would hold events for hours
     sys.stdout.write(json.dumps(data, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 def now() -> float:
@@ -413,6 +419,27 @@ def finalize_meta(tdir: Path, meta: dict[str, Any]) -> None:
         return
 
 
+def patch_meta(tdir: Path, **fields: Any) -> dict[str, Any]:
+    """Apply fields to the *on-disk* meta, from the supervisor, without resurrecting it.
+
+    The supervisor holds meta in memory for the length of a turn while the CLI writes
+    to the same file (`kill` stamping `killed`, `send` bumping turns). Writing its own
+    stale copy back would silently undo those, so every mid-turn write re-reads first
+    and patches. Returns the merged meta so the caller can keep its copy current."""
+    if not tdir.exists():
+        return {}
+    merged = load_meta(tdir)
+    if not merged:
+        return {}
+    for key, value in fields.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    finalize_meta(tdir, merged)
+    return merged
+
+
 def valid_task_name(name: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*", name))
 
@@ -457,13 +484,22 @@ def task_owner() -> str:
     sessions' still-uncollected results. Stamping an owner and scoping both
     verbs to it keeps parallel sessions from stepping on each other.
 
-    `CDX_OWNER` (the skill mints a stable per-chat slug) wins; otherwise the
-    resolved cwd, so parallel *worktrees* get distinct owners with zero config.
-    The cwd fallback collides when two sessions share one checkout, which is
-    exactly why the skill sets `CDX_OWNER` unconditionally."""
+    Precedence: `CDX_OWNER` (an explicit per-chat slug) wins; then a session id
+    the harness itself exports, which is stable for the whole conversation and
+    costs the agent nothing to maintain; then the resolved cwd, so parallel
+    *worktrees* still get distinct owners with zero config. The cwd fallback is
+    the weak one: it collides whenever two sessions share one checkout, which is
+    why anything better is preferred over it.
+
+    Harness ids are namespaced (`codex:<id>`) so they can never collide with a
+    cwd path or a hand-minted slug."""
     override = os.environ.get("CDX_OWNER", "").strip()
     if override:
         return override
+    for env_var, prefix in HARNESS_SESSION_ENV:
+        session = os.environ.get(env_var, "").strip()
+        if session:
+            return f"{prefix}:{session}"
     return str(Path.cwd().resolve())
 
 
@@ -857,6 +893,10 @@ def status_payload(name: str, tdir: Path) -> dict[str, Any]:
     )
     if "stall_reason" in meta:
         payload["stall_reason"] = meta["stall_reason"]
+    # a live task the watchdog finds suspiciously quiet: still working, still
+    # untouched, flagged so the orchestrator can judge instead of the watchdog
+    payload["stall_suspect"] = bool(meta.get("stall_suspect")) and state == "working"
+    payload["quiet_for_s"] = int(now() - float(meta["stall_suspect_since"])) if payload["stall_suspect"] and meta.get("stall_suspect_since") else None
     return payload
 
 
@@ -877,6 +917,8 @@ def list_payload(name: str, tdir: Path) -> dict[str, Any]:
             "last_output_age_s",
             "last_activity",
             "question",
+            "stall_suspect",
+            "quiet_for_s",
         )
     }
 
@@ -923,7 +965,7 @@ def interrupt_pid(pid: int | None) -> None:
         pass
 
 
-def launch_helper(root: Path, name: str, prompt_path: Path, mode: str, stall_after: int, backend: str, backend_bin: str) -> int:
+def launch_helper(root: Path, name: str, prompt_path: Path, mode: str, stall_after: int, hard_kill_after: int, backend: str, backend_bin: str) -> int:
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -938,6 +980,8 @@ def launch_helper(root: Path, name: str, prompt_path: Path, mode: str, stall_aft
         mode,
         "--stall-after",
         str(stall_after),
+        "--hard-kill-after",
+        str(hard_kill_after),
         "--backend",
         backend,
         "--backend-bin",
@@ -1003,7 +1047,7 @@ def spawn_task(args: argparse.Namespace) -> int:
     meta["turn_launched_at"] = meta["spawned_at"]
     save_meta(tdir, meta)
     backend_bin = locate_backend(backend)
-    pid = launch_helper(root, name, tdir / "prompt.md", "spawn", args.stall_after, backend, backend_bin)
+    pid = launch_helper(root, name, tdir / "prompt.md", "spawn", args.stall_after, args.hard_kill_after, backend, backend_bin)
     meta = load_meta(tdir)
     if not meta.get("pid"):
         meta["pid"] = pid
@@ -1045,28 +1089,42 @@ def run_turn(args: argparse.Namespace) -> int:
         if int(meta.get("turns") or 0) < int(meta.get("turns_launched") or 0):
             meta["turns"] = int(meta["turns_launched"])
         save_meta(tdir, meta)
+        # the watchdog reports first and only kills at a much later, separate limit:
+        # it cannot tell a hung worker from one sitting inside an eight-minute test
+        # run, and killing the second costs real work. Raising a flag wakes the
+        # orchestrator through watch/wait just as fast and lets it judge.
         stall_after = int(args.stall_after)
+        hard_kill_after = int(args.hard_kill_after)
         last_size = combined_size(tdir)
         last_growth = now()
-        check_interval = 30
+        # 30s is the sampling floor that matters at production thresholds; a short
+        # threshold (tests, a deliberately twitchy task) would otherwise be detected
+        # a full interval late, which for a 5s threshold is mostly interval
+        check_interval = max(1, min(30, stall_after or hard_kill_after or 30))
         next_check = now() + check_interval
         thread_id_captured = bool(meta.get("thread_id"))
+        suspect = False
         while proc.poll() is None:
             time.sleep(0.2)
             if not thread_id_captured:
                 events = read_events(tdir)
                 thread_id = newest_thread_id(events, backend)
                 if thread_id and meta.get("thread_id") != thread_id:
-                    meta["thread_id"] = thread_id
-                    finalize_meta(tdir, meta)
+                    meta = patch_meta(tdir, thread_id=thread_id) or meta
                     thread_id_captured = True
-            if not stall_after or now() < next_check:
+            if not (stall_after or hard_kill_after) or now() < next_check:
                 continue
+            next_check = now() + check_interval
             size = combined_size(tdir)
             if size > last_size:
                 last_size = size
                 last_growth = now()
-            elif now() - last_growth >= stall_after:
+                if suspect:
+                    suspect = False
+                    meta = patch_meta(tdir, stall_suspect=None, stall_suspect_since=None, stall_reason=None) or meta
+                continue
+            quiet_for = now() - last_growth
+            if hard_kill_after and quiet_for >= hard_kill_after:
                 before = last_size
                 try:
                     proc.send_signal(signal.SIGINT)
@@ -1074,19 +1132,19 @@ def run_turn(args: argparse.Namespace) -> int:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
-                after = combined_size(tdir)
-                meta.update(
-                    {
-                        "state": "stalled",
-                        "last_exit_code": proc.returncode,
-                        "stall_reason": f"no byte growth for {stall_after}s",
-                        "stall_bytes_before": before,
-                        "stall_bytes_after": after,
-                    }
+                patch_meta(
+                    tdir,
+                    state="stalled",
+                    last_exit_code=proc.returncode,
+                    stall_suspect=None,
+                    stall_reason=f"no byte growth for {int(quiet_for)}s (hard limit {hard_kill_after}s)",
+                    stall_bytes_before=before,
+                    stall_bytes_after=combined_size(tdir),
                 )
-                finalize_meta(tdir, meta)
                 return 0
-            next_check = now() + check_interval
+            if stall_after and quiet_for >= stall_after and not suspect:
+                suspect = True
+                meta = patch_meta(tdir, stall_suspect=True, stall_suspect_since=last_growth, stall_reason=f"no byte growth for {stall_after}s") or meta
     if stdin_file is not None:
         stdin_file.close()
     events = read_events(tdir)
@@ -1095,6 +1153,9 @@ def run_turn(args: argparse.Namespace) -> int:
     thread_id = newest_thread_id(events, backend)
     if thread_id:
         meta["thread_id"] = thread_id
+    # the turn is over, so a quiet-output suspicion raised during it is history
+    for key in ("stall_suspect", "stall_suspect_since", "stall_reason"):
+        meta.pop(key, None)
     meta["last_exit_code"] = proc.returncode
     meta["turns_launched"] = turns_launched(meta, events)
     meta["turns"] = max(int(meta.get("turns") or 0), int(meta["turns_launched"]), turn_count(events, backend))
@@ -1107,24 +1168,28 @@ def emit(args: argparse.Namespace, data: Any, human: str) -> None:
     if getattr(args, "json", False):
         json_out(data)
     else:
-        print(human)
+        print(human, flush=True)
 
 
-def list_tasks(args: argparse.Namespace) -> int:
-    root = state_root(args)
-    ensure_state(root)
+def owned_rows(root: Path, args: argparse.Namespace) -> tuple[list[dict[str, Any]], int]:
+    """The owner-scoped fleet view `list` and `watch` share.
+
+    The registry is shared by every session on the machine, so the default view is
+    scoped to our own tasks (the same owner contract clean follows) and parallel
+    sessions don't drag each other's fleets into every check-in. --any-owner is the
+    deliberate machine-wide view; -C/--repo additionally covers tasks targeting that
+    repo regardless of the cwd they were spawned from.
+    """
     rows = []
     skipped_foreign = 0
     cutoff = now() - 24 * 60 * 60
-    # the registry is shared by every session on the machine: scope the default view
-    # to our own tasks (the same owner contract clean follows) so parallel sessions
-    # don't drag each other's fleets into every check-in. --any-owner is the
-    # deliberate machine-wide view; -C/--repo additionally shows tasks targeting
-    # that repo regardless of the cwd they were spawned from.
     me = task_owner()
     repo_filter = str(Path(args.repo).expanduser().resolve()) if args.repo else None
     for path in tasks_dir(root).glob("*"):
-        if not path.is_dir():
+        # `watch` scans on a timer, so it races `clean`: a directory that vanished
+        # between the glob and the read would otherwise derive a phantom state from
+        # empty meta and report a cleaned task as a fresh failure
+        if not path.is_dir() or not (path / "meta.json").exists():
             continue
         row = list_payload(path.name, path)
         meta = load_meta(path)
@@ -1137,7 +1202,16 @@ def list_tasks(args: argparse.Namespace) -> int:
             skipped_foreign += 1
             continue
         rows.append(row)
-    rows.sort(key=lambda row: (ATTENTION_ORDER.get(row["state"], 4), row["task"]))
+    # a working task the watchdog flagged as quiet outranks the working ones that
+    # are visibly making progress, without displacing anything actually blocked
+    rows.sort(key=lambda row: (ATTENTION_ORDER.get(row["state"], 4) - (0.5 if row.get("stall_suspect") else 0), row["task"]))
+    return rows, skipped_foreign
+
+
+def list_tasks(args: argparse.Namespace) -> int:
+    root = state_root(args)
+    ensure_state(root)
+    rows, skipped_foreign = owned_rows(root, args)
     if args.json:
         json_out({"tasks": rows, "skipped_foreign": skipped_foreign})
     else:
@@ -1146,6 +1220,230 @@ def list_tasks(args: argparse.Namespace) -> int:
             print(f"{row['task']} {row['state']} {row['repo']}{q}")
         if skipped_foreign:
             print(f"(skipped {skipped_foreign} task(s) owned by other sessions; use --any-owner to see them, or -C <repo> for one repo's tasks)")
+    return 0
+
+
+def fmt_age(seconds: Any) -> str:
+    if seconds is None:
+        return "?"
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+def watch_row(row: dict[str, Any]) -> dict[str, Any]:
+    """An event carries the delta only: what the reader could not already know.
+
+    `backend`, `model`, `repo`, and `owner` were all chosen by the caller at spawn
+    and keyed by the task name it is holding, so repeating them on every event (and
+    on every heartbeat row, forever) is pure context cost. They stay one `status`
+    call away. `last_activity` earns its place only when nothing better explains the
+    task: it is what makes a quiet task judgeable ("running pnpm test"), but on a
+    finished turn it is a constant, and next to an escalated question it is noise."""
+    slim = {"task": row["task"], "state": row["state"], "age_s": row.get("age_s")}
+    if row.get("question"):
+        slim["question"] = condense(row["question"], 300)
+    if row.get("stall_suspect"):
+        slim["quiet_for_s"] = row.get("quiet_for_s")
+    if row["state"] != "done" and not row.get("question"):
+        slim["last_activity"] = row.get("last_activity")
+    return slim
+
+
+def brief(row: dict[str, Any]) -> str:
+    """One task as a single string, for the lines that only sketch the fleet."""
+    text = f"{row['task']} {row['state']} {fmt_age(row.get('age_s'))}"
+    if row.get("stall_suspect"):
+        text += f" quiet {fmt_age(row.get('quiet_for_s'))}"
+    if row.get("question"):
+        text += f" :: {condense(row['question'], 120)}"
+    return text
+
+
+def fleet_summary(event: str, rows: list[dict[str, Any]], working: list[dict[str, Any]]) -> dict[str, Any]:
+    """The fleet sketched in one line: what is still running, what is waiting to be collected."""
+    uncollected = [brief(row) for row in rows if row["state"] in TERMINAL_STATES]
+    payload: dict[str, Any] = {"event": event, "working": [brief(row) for row in working]}
+    if uncollected:
+        payload["uncollected"] = uncollected
+    return payload
+
+
+def marker_of(row: dict[str, Any]) -> tuple[str, bool]:
+    """What `watch` compares between polls: the state plus the quiet-output flag."""
+    return (row["state"], bool(row.get("stall_suspect")))
+
+
+class WatchState:
+    """Turns successive fleet snapshots into the event lines `watch` emits.
+
+    Kept separate from the polling loop so the transition and heartbeat rules are
+    testable without a clock: `step` is pure apart from the state it carries.
+    """
+
+    def __init__(self, heartbeat: int) -> None:
+        self.heartbeat = heartbeat
+        self.seen: dict[str, str] = {}
+        self.armed = False
+        self.last_line = 0.0
+
+    def step(self, rows: list[dict[str, Any]], skipped_foreign: int, moment: float) -> list[dict[str, Any]]:
+        if not self.armed:
+            self.armed = True
+            self.seen = {row["task"]: marker_of(row) for row in rows}
+            self.last_line = moment
+            # confirms two things and nothing more: the scoping is right, and the
+            # tasks you expect are visible. You spawned them; you know the rest
+            armed = {"event": "armed", "owner": task_owner(), "heartbeat_s": self.heartbeat, "tasks": {row["task"]: row["state"] for row in rows}}
+            if skipped_foreign:
+                armed["skipped_foreign"] = skipped_foreign
+            return [armed]
+        events = []
+        live = set()
+        for row in rows:
+            name = row["task"]
+            live.add(name)
+            marker = marker_of(row)
+            previous = self.seen.get(name)
+            self.seen[name] = marker
+            if previous == marker:
+                continue
+            state, suspect = marker
+            if previous is None:
+                # a task we have never seen that is quietly working is our own fresh
+                # spawn, not news; anything else that shows up already needs saying
+                if marker == ("working", False):
+                    continue
+                events.append({"event": "stall_suspect", **watch_row(row)} if state == "working" else {"event": "change", "previous_state": None, **watch_row(row)})
+            elif previous[0] != state:
+                events.append({"event": "change", "previous_state": previous[0], **watch_row(row)})
+            else:
+                # same state, the quiet flag flipped: output dried up, or came back
+                events.append({"event": "stall_suspect" if suspect else "recovered", **watch_row(row)})
+        for name in [name for name in self.seen if name not in live]:
+            # cleaned or aged out of the window: an absence is not an event
+            self.seen.pop(name, None)
+        working = [row for row in rows if row["state"] == "working"]
+        if not events and working and self.heartbeat and moment - self.last_line >= self.heartbeat:
+            # says "still alive, here is the shape" and nothing else. Every change
+            # was already announced; repeating full rows every ten minutes would
+            # cost more context than the whole run's actual news
+            events.append(fleet_summary("heartbeat", rows, working))
+        if events:
+            self.last_line = moment
+        return events
+
+
+def watch_human(event: dict[str, Any]) -> str:
+    kind = event.get("event")
+    if kind == "armed":
+        tasks = event.get("tasks") or {}
+        summary = ", ".join(f"{task} {state}" for task, state in tasks.items()) or "no tasks"
+        return f"armed owner={event.get('owner')} heartbeat={fmt_age(event.get('heartbeat_s'))} :: {summary}"
+    if kind == "change":
+        question = f" question={condense(event['question'], 120)}" if event.get("question") else ""
+        return f"change {event.get('task')} {event.get('previous_state')} -> {event.get('state')} age={fmt_age(event.get('age_s'))} repo={event.get('repo')}{question}"
+    if kind == "stall_suspect":
+        return f"stall_suspect {event.get('task')} no output for {fmt_age(event.get('quiet_for_s'))}, still running: peek to judge, send --now to redirect, kill to stop"
+    if kind == "recovered":
+        return f"recovered {event.get('task')} is producing output again"
+    if kind in {"heartbeat", "timeout"}:
+        working = ", ".join(event.get("working") or []) or "none"
+        uncollected = ", ".join(event.get("uncollected") or [])
+        return f"{kind} working: {working}" + (f" | uncollected: {uncollected}" if uncollected else "")
+    return f"{kind} {condense(str(event.get('detail') or ''), 200)}"
+
+
+def watch_tasks(args: argparse.Namespace) -> int:
+    """Long-lived event stream: one line per state change, plus a liveness heartbeat.
+
+    Armed once per session and never re-armed. The orchestrator is woken by the line
+    itself, not by this process exiting, which is why the heartbeat can be a plain
+    tick instead of a timeout that has to look like a failure to be noticed. The
+    heartbeat only ticks while something is actually working, so an idle session
+    stays quiet, and a failed poll is emitted as a line too: silence here must only
+    ever mean "nothing happened", never "the watcher died".
+    """
+    root = state_root(args)
+    ensure_state(root)
+    interval = max(1, int(args.interval))
+    tracker = WatchState(max(0, int(args.heartbeat)))
+    try:
+        while True:
+            try:
+                rows, skipped_foreign = owned_rows(root, args)
+                events = tracker.step(rows, skipped_foreign, now())
+            except Exception as exc:  # noqa: BLE001 - a watcher that dies on one bad poll is worse than a noisy one
+                events = [{"event": "error", "detail": f"poll failed: {exc}"}]
+                tracker.last_line = now()
+            for event in events:
+                emit(args, event, watch_human(event))
+            if args.once:
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def wait_fleet(args: argparse.Namespace) -> int:
+    """Block until this session's fleet changes, then return once. The pull twin of `watch`.
+
+    `watch` needs a harness that can turn a line into a new turn while the session
+    sits idle; a harness without that push path has to keep a turn open and block
+    in a tool call instead. So this is one finite call: it returns on the first
+    change, on the timeout, or immediately when nothing is running. It always
+    exits 0 and always carries the whole fleet, so the caller acts on the payload
+    and calls it again — no follow-up `list`, and no expiry that has to be shaped
+    like a failure to get noticed. It never touches a worker.
+    """
+    root = state_root(args)
+    ensure_state(root)
+    interval = max(1, int(args.interval))
+    timeout = max(0, int(args.timeout))
+    tracker = WatchState(heartbeat=0)
+    start = now()
+    rows, skipped_foreign = owned_rows(root, args)
+    tracker.step(rows, skipped_foreign, start)  # baseline, not an event
+    while True:
+        if not any(row["state"] == "working" for row in rows):
+            # nothing to wait for: returning immediately beats blocking for ten
+            # minutes, and beats a caller looping on an always-ready wait
+            reason, events = "idle", []
+            break
+        if now() - start >= timeout:
+            reason, events = "timeout", []
+            break
+        time.sleep(interval)
+        rows, skipped_foreign = owned_rows(root, args)
+        events = tracker.step(rows, skipped_foreign, now())
+        if events:
+            reason = "change"
+            break
+    # each reason carries what you act on in that case, and not the rest: on a
+    # change the events are the news and the fleet is context you already hold; on
+    # a timeout nothing moved, so a sketch is all there is to say; only `idle`
+    # hands over full rows, because "nothing is running" is when you go collect
+    working = [row for row in rows if row["state"] == "working"]
+    data: dict[str, Any] = {"reason": reason, "waited_s": int(now() - start)}
+    if reason == "change":
+        data["events"] = events
+        data["working"] = [brief(row) for row in working]
+    elif reason == "timeout":
+        summary = fleet_summary("timeout", rows, working)
+        summary.pop("event")  # `wait` says `reason`; `event` is watch's vocabulary
+        data.update(summary)
+    else:
+        data["tasks"] = rows
+    if skipped_foreign:
+        data["skipped_foreign"] = skipped_foreign
+    if events:
+        human = f"{reason} after {fmt_age(data['waited_s'])}" + "".join(f"\n  {watch_human(event)}" for event in events)
+    else:
+        human = watch_human({**data, "event": reason}) if reason == "timeout" else f"{reason} after {fmt_age(data['waited_s'])}"
+    emit(args, data, human)
     return 0
 
 
@@ -1279,16 +1577,31 @@ def result_task(args: argparse.Namespace) -> int:
     name, tdir = resolve_task(root, args.task)
     start = now()
     timeout = int(args.timeout)
+    timed_out = False
     while True:
         payload = status_payload(name, tdir)
         state = payload["state"]
         if state != "working" or not args.wait:
             break
         if now() - start >= timeout:
-            raise CdxError(6, f"timeout after {timeout}s waiting for {name}: not a failure, the task keeps running; check cdx status {name} (or list), then re-run result --wait")
+            timed_out = True
+            break
         time.sleep(1)
     if payload["state"] == "working":
-        eprint("still working; use --wait or peek")
+        # a wait that runs out is not a failure and must not be shaped like one: the
+        # task is simply still running, which is what exit 10 means everywhere else
+        # in this CLI. Session liveness is `watch`'s job, not this timeout's.
+        data = {
+            "task": name,
+            "backend": meta_backend(load_meta(tdir)),
+            "state": "working",
+            "reason": "timeout" if timed_out else "no_wait",
+            "waited_s": int(now() - start),
+            "turns": payload["turns"],
+            "duration_s": payload["age_s"],
+            "last_activity": payload["last_activity"],
+        }
+        emit(args, data, f"{name} still working (waited {fmt_age(data['waited_s'])}); the task keeps running, inspect with status/peek")
         return 10
     events = read_events(tdir)
     meta = load_meta(tdir)
@@ -1336,7 +1649,7 @@ def send_task(args: argparse.Namespace) -> int:
     meta["turn_launched_at"] = now()
     save_meta(tdir, meta)
     backend_bin = locate_backend(backend)
-    pid = launch_helper(root, name, prompt_path, "resume", args.stall_after, backend, backend_bin)
+    pid = launch_helper(root, name, prompt_path, "resume", args.stall_after, args.hard_kill_after, backend, backend_bin)
     meta = load_meta(tdir)
     data = {
         "task": name,
@@ -1360,10 +1673,14 @@ def kill_task(args: argparse.Namespace) -> int:
         data = {"task": name, "state": payload["state"]}
         emit(args, data, f"{name} {payload['state']} (already terminal; kill was a no-op)")
         return 0
-    interrupt_pid(payload.get("pid"))
+    # stamp the state before killing, not after: derive_state treats "killed" as
+    # sticky, so a concurrent reader (status, list, and now watch polling on a timer)
+    # would otherwise catch the window where the process is already gone but meta
+    # still says working, and derive - or worse, persist - a spurious "failed"
     meta = load_meta(tdir)
     meta["state"] = "killed"
     save_meta(tdir, meta)
+    interrupt_pid(payload.get("pid"))
     data = {"task": name, "state": "killed"}
     emit(args, data, f"{name} killed")
     return 0
@@ -1602,7 +1919,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     spawn.add_argument("--no-preamble", action="store_true")
-    spawn.add_argument("--stall-after", type=int, default=300)
+    spawn.add_argument("--stall-after", type=int, default=300, help="seconds without output before the task is flagged stall_suspect (reported, never killed; 0 disables)")
+    spawn.add_argument("--hard-kill-after", type=int, default=3600, help="seconds without output before the worker really is killed and marked stalled (0 disables the kill entirely)")
     spawn.set_defaults(func=spawn_task)
 
     listing = sub.add_parser("list")
@@ -1611,6 +1929,32 @@ def build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--any-owner", action="store_true", help="include tasks owned by other sessions (default: only your own; foreign tasks surface as a skipped_foreign count)")
     listing.add_argument("-C", "--repo", help="also show tasks that target this repo, regardless of the cwd they were spawned from")
     listing.set_defaults(func=list_tasks)
+
+    watch = sub.add_parser("watch", help="stream one line per task state change plus a liveness heartbeat; runs until stopped")
+    globals_for(watch)
+    watch.add_argument("--heartbeat", type=int, default=600, help="seconds between liveness lines while at least one task is working (0 disables; changes reset the timer)")
+    watch.add_argument("--interval", type=int, default=15, help="seconds between polls of the task registry")
+    watch.add_argument("--once", action="store_true", help="emit the arming snapshot and exit instead of streaming")
+    watch.add_argument("--any-owner", action="store_true", help="watch tasks owned by other sessions too (default: only your own)")
+    watch.add_argument("-C", "--repo", help="also watch tasks that target this repo, regardless of the cwd they were spawned from")
+    watch.set_defaults(func=watch_tasks, all=False)
+
+    wait = sub.add_parser("wait", help="block until this session's fleet changes, then return once (the pull twin of watch)")
+    globals_for(wait)
+    wait.add_argument(
+        "--timeout",
+        type=int,
+        default=540,
+        help=(
+            "seconds before returning with reason=timeout; no worker is touched either way. "
+            "The default sits under the tightest tool-call ceiling a caller has to live with "
+            "(Claude Code caps a Bash call at 600s), so the wait always outlives its own call"
+        ),
+    )
+    wait.add_argument("--interval", type=int, default=5, help="seconds between polls of the task registry")
+    wait.add_argument("--any-owner", action="store_true", help="wait on tasks owned by other sessions too (default: only your own)")
+    wait.add_argument("-C", "--repo", help="also wait on tasks that target this repo, regardless of the cwd they were spawned from")
+    wait.set_defaults(func=wait_fleet, all=False)
 
     status = sub.add_parser("status")
     globals_for(status)
@@ -1629,7 +1973,7 @@ def build_parser() -> argparse.ArgumentParser:
     globals_for(result)
     result.add_argument("task")
     result.add_argument("--wait", action="store_true")
-    result.add_argument("--timeout", type=int, default=600, help="seconds before --wait returns exit 6; the task keeps running, this is a bounded check-in, not a deadline on the task")
+    result.add_argument("--timeout", type=int, default=3600, help="upper bound on --wait; on expiry it returns exit 10 (still working) with the task untouched. Session liveness is cdx watch's job, so this bound only has to stop a wait from hanging forever")
     result.set_defaults(func=result_task)
 
     send = sub.add_parser("send")
@@ -1639,7 +1983,8 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("-f", "--file", action="append")
     send.add_argument("--now", action="store_true")
     send.add_argument("--no-preamble", action="store_true")
-    send.add_argument("--stall-after", type=int, default=300)
+    send.add_argument("--stall-after", type=int, default=300, help="seconds without output before the task is flagged stall_suspect (reported, never killed; 0 disables)")
+    send.add_argument("--hard-kill-after", type=int, default=3600, help="seconds without output before the worker really is killed and marked stalled (0 disables the kill entirely)")
     send.set_defaults(func=send_task)
 
     kill = sub.add_parser("kill")
@@ -1680,6 +2025,7 @@ def build_parser() -> argparse.ArgumentParser:
     helper.add_argument("--prompt-file", required=True)
     helper.add_argument("--mode", choices=["spawn", "resume"], required=True)
     helper.add_argument("--stall-after", type=int, required=True)
+    helper.add_argument("--hard-kill-after", type=int, required=True)
     helper.add_argument("--backend", choices=list(BACKENDS), required=True)
     helper.add_argument("--backend-bin", required=True)
     helper.set_defaults(func=run_turn)
