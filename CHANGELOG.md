@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0 (2026-08-14)
+
+- **Pin grok to a concrete model instead of riding the provider's rolling default.** codex has always resolved `sol`/`terra` to a pinned id; grok was the one backend where cdx sent no `-m` at all and let the CLI pick, so a provider-side default flip could change what runs between two spawns of the same fleet, and `result` reported `model: null` — the task never recorded what it actually ran on. `--effort`/`--model` overrides are unaffected: an explicit `--model` still wins.
+- Raise grok's effort ceiling from `high` to `xhigh`, so `--effort max` means the same everywhere. The old cap dated from grok's `--reasoning-effort` accepting any string unvalidated; it now validates against `low|medium|high|xhigh` and rejects the rest with an `error` event. Verified against codex-cli 0.147.0, claude 2.1.232 and grok 1.0.3: all three CLIs keep the flags, event shapes and resume paths cdx depends on, and both codex and claude have since gained a `max` tier above `xhigh` — deliberately left outside cdx's surface, because it costs a lot for little gain.
+
 ## 0.8.0 (2026-08-03)
 
 - `wait --timeout` defaults to 540s, not 600s. Claude Code caps a single Bash call at 600s, so the previous default raced its own tool call and would have been killed just before returning — measured against real harness ceilings after Codex reported a 30s initial yield and a 300s continuation-poll cap in its own shell interface (confirmed independently in an interactive Codex session and in a headless `codex exec` worker). Both facts are now in SKILL.md: an empty return with the session still alive is not a result, keep polling the same session, and never start a second `wait`.

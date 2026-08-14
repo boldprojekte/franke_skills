@@ -75,15 +75,15 @@ When using the source checkout directly, replace `.agents/skills/cxcc-subagent` 
 
 ### Model tiers and a uniform effort dial
 
-The orchestrating agent picks a model tier per backend through stable aliases — `opus|sonnet` on claude, `sol|terra` on codex (default `sol`) — and a reasoning effort that translates uniformly everywhere:
+The orchestrating agent picks a model tier per backend through stable aliases — `opus|sonnet` on claude, `sol|terra` on codex (default `sol`), a single pinned model on grok — and a reasoning effort that translates uniformly everywhere:
 
 | `cdx --effort` | codex (Sol/Terra) | claude (Opus/Sonnet) | grok |
 |---|---|---|---|
 | `medium` (default) | medium | medium | medium |
 | `high` | high | high | high |
-| `max` | xhigh | xhigh | high (its ceiling) |
+| `max` | xhigh | xhigh | xhigh |
 
-Each provider's very top reasoning tier (Claude `max`, Codex `ultra`) is deliberately unreachable through this surface. cdx pins the aliases to concrete model IDs (currently GPT-5.6 Sol/Terra), so provider model bumps never require agent-facing changes.
+Codex and claude both expose a `max` tier above `xhigh`; that top tier is deliberately unreachable through this surface, because it costs a lot for little gain. `xhigh` is grok's own ceiling, so there `max` does reach the top. cdx pins the aliases to concrete model IDs (currently GPT-5.6 Sol/Terra on codex, Grok 4.6 on grok), so provider model bumps never require agent-facing changes and a task always records the model it actually ran on.
 
 Fable 5 is never selected automatically. It is available only through an explicit user-directed model override and gets its own effort translation (`medium → low`, `high → medium`, `max → xhigh`) to keep subagent cost in check. JSON responses report the public effort, resolved model, and provider effort separately.
 

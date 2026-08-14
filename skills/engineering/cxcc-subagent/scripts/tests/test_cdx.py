@@ -200,8 +200,8 @@ class GrokBackendTests(TempCase):
         resume = cdx.backend_cmd(self.grok_meta(thread_id="sess-1", effort="max"), prompt, "resume", "grok-bin")
         self.assertEqual(resume[resume.index("--resume") + 1], "sess-1")
         self.assertEqual(resume[resume.index("--prompt-file") + 1], str(prompt))
-        # cdx "max" maps to grok "high"
-        self.assertEqual(resume[resume.index("--reasoning-effort") + 1], "high")
+        # cdx "max" maps to grok "xhigh", the same ceiling as codex and claude
+        self.assertEqual(resume[resume.index("--reasoning-effort") + 1], "xhigh")
 
     def test_grok_resume_without_thread_id_errors(self):
         prompt = self.base / "prompt.md"
@@ -210,8 +210,16 @@ class GrokBackendTests(TempCase):
             cdx.backend_cmd(self.grok_meta(), prompt, "resume", "grok-bin")
         self.assertEqual(ctx.exception.code, 4)
 
+    def test_grok_model_is_pinned_unless_overridden(self):
+        model, effort = cdx.resolve_execution("grok", "high", None)
+        self.assertEqual(model, cdx.GROK_DEFAULT_MODEL)
+        self.assertEqual(effort, "high")
+        # an explicit model still wins over the pin
+        model, _ = cdx.resolve_execution("grok", "high", "grok-4.5")
+        self.assertEqual(model, "grok-4.5")
+
     def test_grok_effort_mapping(self):
-        self.assertEqual(cdx.BACKENDS["grok"].efforts, {"medium": "medium", "high": "high", "max": "high"})
+        self.assertEqual(cdx.BACKENDS["grok"].efforts, {"medium": "medium", "high": "high", "max": "xhigh"})
         self.assertEqual(cdx.backend_effort("grok", "medium"), "medium")
         self.assertIsNone(cdx.backend_effort("grok", None))
 

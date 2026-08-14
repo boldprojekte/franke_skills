@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -32,6 +32,7 @@ CODEX_MODEL_ALIASES = {
     "sol": "gpt-5.6-sol",
     "terra": "gpt-5.6-terra",
 }
+GROK_DEFAULT_MODEL = "grok-4.6"
 FABLE_EFFORTS = {"medium": "low", "high": "medium", "max": "xhigh"}
 SPAWN_PREAMBLE = """[orchestration protocol] You are run non-interactively by an orchestrating
 agent. If you hit a decision you cannot make yourself (missing access,
@@ -251,9 +252,9 @@ class GrokBackend:
 
     name = "grok"
     bin_name, bin_env, install_hint = "grok", "CDX_GROK_BIN", "install Grok CLI"
-    # grok's --reasoning-effort accepts any string unvalidated; assume low/medium/high.
-    # grok is cheap, so medium/high map straight through instead of one tier down
-    efforts = {"medium": "medium", "high": "high", "max": "high"}
+    # grok validates --reasoning-effort against low/medium/high/xhigh and rejects
+    # anything else with an `error` event, so the mapping matches codex and claude
+    efforts = {"medium": "medium", "high": "high", "max": "xhigh"}
     uses_prompt_file = True  # prompt is passed as --prompt-file, not stdin
 
     def build_cmd(self, meta: dict[str, Any], prompt_file: Path, mode: str, backend_bin: str) -> list[str]:
@@ -530,6 +531,11 @@ def resolve_execution(backend: str, effort: str, model: str | None) -> tuple[str
     if backend == "codex":
         alias = (model or CODEX_DEFAULT_MODEL).lower()
         model = CODEX_MODEL_ALIASES.get(alias, model)
+    if backend == "grok" and not model:
+        # pin the concrete model instead of riding grok's rolling default, so a
+        # task's provider model is recorded and a provider-side default flip
+        # cannot change what runs mid-flight
+        model = GROK_DEFAULT_MODEL
     if backend == "claude" and is_fable_model(model):
         return model, FABLE_EFFORTS[effort]
     provider_effort = backend_effort(backend, effort)
@@ -1915,7 +1921,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="medium",
         help=(
             "reasoning dial, uniform across backends: medium=medium, high=high, max=xhigh "
-            "(grok caps at high; Fable override: medium=low, high=medium, max=xhigh)"
+            "(Fable override: medium=low, high=medium, max=xhigh)"
         ),
     )
     spawn.add_argument("--no-preamble", action="store_true")
