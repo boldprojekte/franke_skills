@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 (2026-08-20)
+
+- **Make every documented call shape parse on every supported python.** argparse in some interpreters this skill's "Python 3.10+" promise covers (seen on 3.12.4, fixed upstream by 3.12.11) rejects an option between two positionals when the second is optional — so `send <task> --now "text"` and the smoke tests' `send … <task> --stall-after 120 "text"` died in the parser with `unrecognized arguments`, before any backend ran. Only `send` has that two-positional shape today, but the failure looked like three broken backends and cost two diagnosis rounds. `normalize_global_args` now hoists *all* of a subcommand's options in front of its positionals (it previously moved only `--json`/`--state-dir`), reading the option table from the parser itself so new options are covered automatically. `--` still guards option-lookalike prompts, `--opt=value` is handled, and `peek --thinking`'s optional value stays in place. The command list is also derived from the parser, closing a latent gap where `watch`/`wait` were missing from the hardcoded set.
+- **Breaking:** option prefix abbreviations (`--stall` for `--stall-after`) are rejected everywhere (`allow_abbrev=False`). An abbreviation would slip past the hoist and hit the very argparse bug it works around; for a CLI driven by agents, unambiguous beats convenient.
+- `doctor` now reports the running python version and executable and probes the worst-case parse (`send <task> --now "text" --json`), so a broken interpreter/argparse combination surfaces as a named check instead of deep inside a real follow-up.
+- New deterministic parser regression tests pin the documented call shapes from SKILL.md in-process, without touching real backends.
+
 ## 0.9.0 (2026-08-14)
 
 - **Pin grok to a concrete model instead of riding the provider's rolling default.** codex has always resolved `sol`/`terra` to a pinned id; grok was the one backend where cdx sent no `-m` at all and let the CLI pick, so a provider-side default flip could change what runs between two spawns of the same fleet, and `result` reported `model: null` — the task never recorded what it actually ran on. `--effort`/`--model` overrides are unaffected: an explicit `--model` still wins.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import io
 import json
 import os
 import random
@@ -18,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -1829,6 +1830,29 @@ def config_unset(args: argparse.Namespace) -> int:
 def doctor(args: argparse.Namespace) -> int:
     root = state_root(args)
     checks = []
+    # some interpreters ship an argparse that rejects options between two
+    # positionals (seen on 3.12.4); normalize_global_args reorders around it.
+    # Probe the documented worst case so a broken combination surfaces here,
+    # with the exact python that runs cdx, instead of deep inside a real send.
+    probe = ["send", "some-task", "--now", "some follow-up prompt", "--json"]
+    quiet, real_stderr = io.StringIO(), sys.stderr
+    try:
+        sys.stderr = quiet
+        probe_parser = build_parser()
+        probe_parser.parse_args(normalize_global_args(probe, probe_parser))
+        parse_ok = True
+    except SystemExit:
+        parse_ok = False
+    finally:
+        sys.stderr = real_stderr
+    checks.append(
+        {
+            "name": "python argparse",
+            "ok": parse_ok,
+            "detail": f"{sys.version.split()[0]} at {sys.executable}",
+            "fix": "run cdx with a different python3 (this one mis-parses documented cdx calls)",
+        }
+    )
     codex = BACKENDS["codex"]
     codex_fix = f"{codex.install_hint} or set {codex.bin_env}"
     try:
@@ -1894,11 +1918,23 @@ def doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+class NoAbbrevParser(argparse.ArgumentParser):
+    """Rejects option-prefix abbreviations (--stall for --stall-after).
+
+    Abbreviated options would slip past normalize_global_args's hoist and hit
+    the very argparse ordering bug the hoist works around, so the surface only
+    accepts full option names."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cdx")
+    parser = NoAbbrevParser(prog="cdx")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--state-dir")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=NoAbbrevParser)
 
     def globals_for(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -2038,40 +2074,78 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def normalize_global_args(argv: list[str]) -> list[str]:
-    if not argv:
-        return argv
-    commands = {"spawn", "list", "status", "peek", "result", "send", "kill", "clean", "config", "doctor", "__run_turn"}
-    try:
-        command_index = next(index for index, value in enumerate(argv) if value in commands)
-    except StopIteration:
-        return argv
-    if argv[command_index] == "__run_turn":
-        return argv
-    before = argv[:command_index]
-    command = argv[command_index]
-    after = argv[command_index + 1 :]
-    moved: list[str] = []
-    kept: list[str] = []
+def normalize_global_args(argv: list[str], parser: argparse.ArgumentParser) -> list[str]:
+    """Hoist a subcommand's options in front of its positionals.
+
+    argparse in some interpreters this skill supports (seen on 3.12.4, fixed by
+    3.12.11) rejects `send <task> --now "text"` with `unrecognized arguments`
+    when an option sits between two positionals and the second is optional.
+    Reordering to options-first parses identically on every version, so every
+    documented call shape works regardless of which python3 runs the script.
+
+    The option table is read from the subparser itself, so new options are
+    covered without touching this function. Tokens after a literal `--` are
+    never treated as options, `--opt=value` is hoisted as one token, and an
+    option with nargs="?" (peek --thinking) stays in place because moving it
+    could let it swallow a positional."""
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
     index = 0
-    while index < len(after):
-        value = after[index]
+    while index < len(argv):
+        value = argv[index]
         if value == "--json":
-            moved.append(value)
             index += 1
-        elif value == "--state-dir" and index + 1 < len(after):
-            moved.extend([value, after[index + 1]])
+        elif value == "--state-dir":
             index += 2
-        else:
-            kept.append(value)
+        elif value.startswith("--state-dir="):
             index += 1
-    return before + moved + [command] + kept
+        elif value in subparsers.choices:
+            break
+        else:
+            return argv  # unknown token before the command; let argparse report it
+    else:
+        return argv
+    command = argv[index]
+    if command == "__run_turn":
+        return argv
+    before = argv[:index]
+    after = argv[index + 1 :]
+    table = {option: action.nargs for action in subparsers.choices[command]._actions for option in action.option_strings}
+    options: list[str] = []
+    positionals: list[str] = []
+    i = 0
+    while i < len(after):
+        value = after[i]
+        if value == "--":
+            positionals.extend(after[i:])
+            break
+        if value.startswith("--") and "=" in value and value.split("=", 1)[0] in table:
+            options.append(value)
+            i += 1
+        elif value in table:
+            nargs = table[value]
+            if nargs == 0:
+                options.append(value)
+                i += 1
+            elif nargs is None:
+                options.extend(after[i : i + 2])
+                i += 2
+            else:  # nargs="?" and friends: leave in place, hoisting could steal a positional
+                positionals.append(value)
+                i += 1
+        elif len(value) > 2 and value.startswith("-") and not value.startswith("--") and value[:2] in table:
+            # short option with attached value, e.g. -fprompt.md
+            options.append(value)
+            i += 1
+        else:
+            positionals.append(value)
+            i += 1
+    return before + [command] + options + positionals
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
-        args = parser.parse_args(normalize_global_args(list(sys.argv[1:] if argv is None else argv)))
+        args = parser.parse_args(normalize_global_args(list(sys.argv[1:] if argv is None else argv), parser))
         return int(args.func(args))
     except CdxError as exc:
         eprint(f"error: {exc.message}")

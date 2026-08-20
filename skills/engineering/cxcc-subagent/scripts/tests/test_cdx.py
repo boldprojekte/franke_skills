@@ -44,6 +44,78 @@ class TempCase(unittest.TestCase):
         self.tmp.cleanup()
 
 
+class ParserNormalizationTests(unittest.TestCase):
+    """Pin that every documented call shape parses, on any supported python.
+
+    argparse on some interpreters (seen on 3.12.4, fixed by 3.12.11) rejects an
+    option between two positionals when the second is optional, which broke
+    `send <task> --now "text"` before it ever reached a backend.
+    normalize_global_args hoists options in front of positionals; these tests
+    run the hoist plus a real parse in-process, so they stay deterministic and
+    catch the regression on whichever python runs the suite."""
+
+    def parse(self, argv):
+        parser = cdx.build_parser()
+        return parser.parse_args(cdx.normalize_global_args(argv, parser))
+
+    def test_hoist_reorders_options_before_positionals(self):
+        parser = cdx.build_parser()
+        self.assertEqual(
+            cdx.normalize_global_args(["send", "t", "--now", "prompt", "--json"], parser),
+            ["send", "--now", "--json", "t", "prompt"],
+        )
+
+    def test_documented_send_shapes(self):
+        for argv in (
+            ["send", "t", "answer text", "--json"],
+            ["send", "t", "--now", "stop, wrong approach", "--json"],
+            ["send", "--json", "--state-dir", "/tmp/s", "t", "--stall-after", "120", "answer text"],
+            ["send", "t", "--state-dir=/tmp/s", "answer text"],
+        ):
+            with self.subTest(argv=argv):
+                args = self.parse(argv)
+                self.assertEqual(args.task, "t")
+                self.assertEqual(args.prompt, "answer text" if "answer text" in argv else "stop, wrong approach")
+
+    def test_send_file_prompt_keeps_prompt_unset(self):
+        args = self.parse(["send", "t", "-f", "a.md", "-f", "b.md", "--json"])
+        self.assertEqual(args.file, ["a.md", "b.md"])
+        self.assertIsNone(args.prompt)
+
+    def test_spawn_options_between_positionals(self):
+        args = self.parse(["spawn", "--json", "-C", "/tmp/repo", "--name", "n", "--stall-after", "120", "build it"])
+        self.assertEqual(args.prompt, "build it")
+        self.assertEqual(args.stall_after, 120)
+
+    def test_double_dash_guards_option_lookalike_prompts(self):
+        args = self.parse(["send", "--json", "t", "--", "--now is not a flag here"])
+        self.assertTrue(args.json)
+        self.assertEqual(args.prompt, "--now is not a flag here")
+
+    def test_config_subcommand_with_trailing_globals(self):
+        args = self.parse(["config", "set", "model.codex", "gpt-test", "--json", "--state-dir", "/tmp/s"])
+        self.assertEqual((args.key, args.value), ("model.codex", "gpt-test"))
+        self.assertTrue(args.json)
+
+    def test_option_abbreviations_are_rejected(self):
+        # an abbreviated option would bypass the hoist and hit the argparse bug,
+        # so the parser refuses prefixes outright
+        with self.assertRaises(SystemExit) as ctx:
+            with open(os.devnull, "w") as devnull:
+                stderr, sys.stderr = sys.stderr, devnull
+                try:
+                    self.parse(["send", "t", "--stall", "120", "answer text"])
+                finally:
+                    sys.stderr = stderr
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_peek_thinking_optional_value_stays_in_place(self):
+        args = self.parse(["peek", "t", "--thinking", "--json"])
+        self.assertEqual(args.thinking, 1000)
+        args = self.parse(["peek", "t", "--thinking", "500"])
+        self.assertEqual(args.thinking, 500)
+
+
 class StateDerivationTests(TempCase):
     def test_state_derivation_all_states(self):
         done_events = [
