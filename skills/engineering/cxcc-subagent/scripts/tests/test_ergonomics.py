@@ -128,3 +128,9 @@ class ErgonomicsTests(TempCase):
         data = {"values": [[{"name": "x"}], [["a", "b"]]]}
         self.assertEqual("\n".join(cdx.toon_lines(data)),
                          "values[2]:\n  - [1]:\n    - name: x\n  - [1]:\n    - [2]: a,b")
+
+    def test_literal_json_flag_after_separator_does_not_change_output_mode(self):
+        result = self.run_cli('config', 'set', 'model.codex', '--', '--json')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(result.stdout.startswith('model:'), result.stdout)
+        self.assertIn('"--json"', result.stdout)

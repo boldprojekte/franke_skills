@@ -2300,9 +2300,10 @@ def normalize_global_args(argv: list[str], parser: argparse.ArgumentParser) -> l
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = argparse.Namespace(json="--json" in raw, state_dir=None, command=None)
+    option_prefix = raw[:raw.index("--")] if "--" in raw else raw
+    args = argparse.Namespace(json="--json" in option_prefix, state_dir=None, command=None)
     # Preserve registry scope even when subcommand parsing fails before namespace merge.
-    for index, token in enumerate(raw[:raw.index("--")] if "--" in raw else raw):
+    for index, token in enumerate(option_prefix):
         if token.startswith("--state-dir="):
             args.state_dir = token.split("=", 1)[1]
         elif token == "--state-dir" and index + 1 < len(raw):
