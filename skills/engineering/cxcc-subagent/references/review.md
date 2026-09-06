@@ -29,8 +29,8 @@ Done when: ref resolved, diff non-empty, target file written.
 ## 3. Spawn both axes in parallel
 
 ```bash
-python3 $CDX spawn -f $ROLES/review-correctness.md -f target.md -C <repo> --name rev-cq-<slug> --json
-python3 $CDX spawn -f $ROLES/review-spec.md        -f target.md -C <repo> --name rev-spec-<slug> --json
+python3 <skill-dir>/scripts/cdx.py spawn -f <skill-dir>/references/roles/review-correctness.md -f target.md -C <repo> --name rev-cq-<slug> --json
+python3 <skill-dir>/scripts/cdx.py spawn -f <skill-dir>/references/roles/review-spec.md        -f target.md -C <repo> --name rev-spec-<slug> --json
 ```
 
 Reviewers are read-only by role instruction; they read the standards/spec files themselves: paths suffice, no pasting repo content. Skip the spec spawn when there is no spec source, and say so in the final report.

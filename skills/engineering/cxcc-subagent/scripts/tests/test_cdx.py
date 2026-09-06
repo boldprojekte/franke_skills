@@ -14,7 +14,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CDX = REPO_ROOT / "scripts" / "cdx.py"
 
-spec = importlib.util.spec_from_file_location("cdx", CDX)
+sys.path.insert(0, str(CDX.parent))
+spec = importlib.util.spec_from_file_location("cdx", CDX.with_name("cdx_core.py"))
 cdx = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(cdx)
@@ -690,8 +691,13 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(self.assert_json_stdout(status_after)["state"], "done")
 
         doctor = self.run_cdx(["doctor", "--json", "--state-dir", str(state)], env=env)
-        self.assertEqual(doctor.returncode, 0, doctor.stderr)
-        self.assertIn("checks", self.assert_json_stdout(doctor))
+        # CI has no persisted interactive Codex sessions. Keep every backend and
+        # registry check mandatory, and verify that this one missing resource is
+        # reported as a failed health check rather than an unconditional success.
+        doctor_data = self.assert_json_stdout(doctor)
+        failed_checks = {check["name"] for check in doctor_data["checks"] if not check["ok"]}
+        self.assertEqual(failed_checks - {"sessions dir"}, set(), doctor_data)
+        self.assertEqual(doctor.returncode, 1 if failed_checks else 0, doctor_data)
 
         clean_dry = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--task", "cli-task", "--dry-run"], env=env)
         self.assertEqual(clean_dry.returncode, 0, clean_dry.stderr)

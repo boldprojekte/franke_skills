@@ -99,7 +99,7 @@ The orchestrating agent picks a model tier per backend through stable aliases �
 
 Astra and Fable are available only on explicit user request. cdx resolves `astra` to `gpt-6-astra` and `fable` to `claude-fable-5-1` (Fable 5.1). Both use the cost-conscious translation `medium → low`, `high → medium`, `max → high`. Raw Astra and Fable model IDs receive the same translation; explicit version IDs are preserved.
 
-Model IDs and effort mappings live in `cdx.py`. JSON responses report the requested effort, resolved model, and provider effort separately. Claude's `opus` and `sonnet` aliases are resolved by its CLI. Existing tasks retain their stored model and provider effort when resumed.
+Model IDs and effort mappings live in `scripts/cdx_core.py`. The `cdx.py` entry point and dependency-free `cdx_version.py` keep version probes fast. JSON responses report the requested effort, resolved model, and provider effort separately. Claude's `opus` and `sonnet` aliases are resolved by its CLI. Existing tasks retain their stored model and provider effort when resumed.
 
 ## Skills
 
