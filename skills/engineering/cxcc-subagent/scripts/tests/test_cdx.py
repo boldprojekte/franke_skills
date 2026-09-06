@@ -234,12 +234,32 @@ class StateDerivationTests(TempCase):
         self.assertEqual(cdx.resolve_execution("codex", "max", "gpt-test"), ("gpt-test", "xhigh"))
 
     def test_fable_has_model_specific_effort_mapping(self):
-        expected = {"medium": "low", "high": "medium", "max": "xhigh"}
-        for model in ("fable", "claude-fable-5", "claude-fable-5-20260701"):
+        expected = {"medium": "low", "high": "medium", "max": "high"}
+        for model in ("fable", "Fable", "claude-fable-5-1", "claude-fable-5", "claude-fable-5-20260701"):
             for cdx_effort, provider_effort in expected.items():
-                self.assertEqual(cdx.resolve_execution("claude", cdx_effort, model), (model, provider_effort))
+                self.assertEqual(cdx.resolve_execution("claude", cdx_effort, model), ("claude-fable-5-1" if model.lower() == "fable" else model, provider_effort))
         self.assertEqual(cdx.resolve_execution("claude", "high", "sonnet"), ("sonnet", "high"))
         self.assertEqual(cdx.resolve_execution("claude", "max", "opus"), ("opus", "xhigh"))
+
+    def test_premium_models_apply_effort_to_spawn_and_resume(self):
+        prompt = self.base / "premium.md"
+        prompt.write_text("hi")
+        for backend, models in (("codex", ("astra", "Astra", "gpt-6-astra", "gpt-6-astra-20260901")),
+                                ("claude", ("fable", "claude-fable-5-1"))):
+            for requested in models:
+                for effort, expected in (("medium", "low"), ("high", "medium"), ("max", "high")):
+                    model, actual = cdx.resolve_execution(backend, effort, requested)
+                    self.assertEqual(actual, expected)
+                    if backend == "codex":
+                        self.assertEqual(model, "gpt-6-astra" if requested.lower() == "astra" else requested)
+                    meta = {"backend": backend, "repo": str(self.base), "model": model,
+                            "effort": effort, "provider_effort": actual, "thread_id": "test-thread"}
+                    for mode in ("spawn", "resume"):
+                        command = cdx.backend_cmd(meta, prompt, mode, "provider-bin")
+                        if backend == "codex":
+                            self.assertIn(f'model_reasoning_effort="{expected}"', command)
+                        else:
+                            self.assertEqual(command[command.index("--effort") + 1], expected)
 
     def test_stored_provider_effort_is_authoritative(self):
         meta = {"backend": "codex", "model": "gpt-5.6-sol", "effort": "max", "provider_effort": "high"}
@@ -720,8 +740,8 @@ class CliSubprocessTests(TempCase):
         result = self.run_cdx(["spawn", "--help"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sol|terra", result.stdout)
-        self.assertIn("uniform across backends", result.stdout)
-        self.assertIn("Fable override", result.stdout)
+        self.assertIn("standard mapping", result.stdout)
+        self.assertIn("Astra/Fable override", result.stdout)
         self.assertIn("medium=low", result.stdout)
 
     def test_config_get_set_unset_round_trip(self):

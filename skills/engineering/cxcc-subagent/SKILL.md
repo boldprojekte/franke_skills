@@ -124,12 +124,11 @@ Keep the user oriented while tasks are in flight. With more than one task, show 
 
 `spawn --backend codex|claude|grok` (default codex): identical verbs, states, and roles across all three. Every task has two dials, with the same mental model on every backend:
 
-- **Model tier** via `--model`: `opus|sonnet` on claude, `sol|terra` on codex (default `sol`). Always use these stable aliases, never raw provider model names. On codex, cdx pins the concrete provider model behind `sol`/`terra`; grok has a single pinned model and needs no `--model` at all; on claude the alias is forwarded to the provider CLI, which resolves it there.
-- **Effort** via `--effort medium|high|max` (default `medium`): the reasoning dial, translated uniformly to `medium|high|xhigh` on every backend. The `max` tier that codex and claude offer above `xhigh` stays deliberately outside this surface: it is expensive and rarely pays off. `high` is the good default for real work.
+- **Model tier** via `--model`: codex `sol|terra` (default `sol`), claude `opus|sonnet`; grok uses its pinned default. Use stable aliases; cdx owns model resolution.
+- **Effort** via `--effort medium|high|max` (default `medium`); cdx translates it per model. Use `high` for real work.
+- **Astra and Fable are user-directed only.** Select codex `astra` or claude `fable` when the user explicitly requests that model.
 
-If the user asks what actually ran, the JSON output of every verb reports `model` and `provider_effort`. On codex and grok `model` is the resolved concrete id; on claude it's the alias you passed (or `null` if you let the provider default it), since the provider CLI does the resolving.
-
-**Fable is user-directed only.** Never select `fable` or `claude-fable-5` from task shape, cost, taste, or review heuristics; as a subagent it is normally too expensive. Spawn it only when the user explicitly asks for Fable (`--backend claude --model fable`); effort translation is handled by cdx as usual.
+Execution details are available in JSON as `model` and `provider_effort`. Claude aliases other than `fable` are resolved by the provider CLI.
 
 Pick by task shape along cost / taste / intelligence. These are defaults with reasons; deviate when the task tells you to:
 

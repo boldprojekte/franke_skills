@@ -73,9 +73,9 @@ Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answer
 
 When using the source checkout directly, replace `.agents/skills/cxcc-subagent` with `skills/engineering/cxcc-subagent`.
 
-### Model tiers and a uniform effort dial
+### Model tiers and effort
 
-The orchestrating agent picks a model tier per backend through stable aliases — `opus|sonnet` on claude, `sol|terra` on codex (default `sol`), a single pinned model on grok — and a reasoning effort that translates uniformly everywhere:
+The orchestrating agent picks a model tier per backend through stable aliases — `opus|sonnet` on claude, `sol|terra` on codex (default `sol`), a single pinned model on grok — and a reasoning effort translated by cdx:
 
 | `cdx --effort` | codex (Sol/Terra) | claude (Opus/Sonnet) | grok |
 |---|---|---|---|
@@ -83,9 +83,9 @@ The orchestrating agent picks a model tier per backend through stable aliases �
 | `high` | high | high | high |
 | `max` | xhigh | xhigh | xhigh |
 
-Codex and claude both expose a `max` tier above `xhigh`; that top tier is deliberately unreachable through this surface, because it costs a lot for little gain. `xhigh` is grok's own ceiling, so there `max` does reach the top. cdx pins the aliases to concrete model IDs (currently GPT-5.6 Sol/Terra on codex, Grok 4.6 on grok), so provider model bumps never require agent-facing changes and a task always records the model it actually ran on.
+Astra and Fable are available only on explicit user request. cdx resolves `astra` to `gpt-6-astra` and `fable` to `claude-fable-5-1` (Fable 5.1). Both use the cost-conscious translation `medium → low`, `high → medium`, `max → high`. Raw Astra and Fable model IDs receive the same translation; explicit version IDs are preserved.
 
-Fable 5 is never selected automatically. It is available only through an explicit user-directed model override and gets its own effort translation (`medium → low`, `high → medium`, `max → xhigh`) to keep subagent cost in check. JSON responses report the public effort, resolved model, and provider effort separately.
+Model IDs and effort mappings live in `cdx.py`. JSON responses report the requested effort, resolved model, and provider effort separately. Claude's `opus` and `sonnet` aliases are resolved by its CLI. Existing tasks retain their stored model and provider effort when resumed.
 
 ## Skills
 

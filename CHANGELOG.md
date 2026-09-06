@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0 (2026-09-06)
+
+- Add the user-directed `astra` alias for GPT-6 Astra and pin `fable` to Claude Fable 5.1.
+- Translate Astra/Fable effort to low, medium, high, including raw model IDs. Existing tasks preserve stored execution settings.
+- Keep model routing in code and condense agent-facing selection instructions.
+
 ## 0.10.0 (2026-08-20)
 
 - **Make every documented call shape parse on every supported python.** argparse in some interpreters this skill's "Python 3.10+" promise covers (seen on 3.12.4, fixed upstream by 3.12.11) rejects an option between two positionals when the second is optional — so `send <task> --now "text"` and the smoke tests' `send … <task> --stall-after 120 "text"` died in the parser with `unrecognized arguments`, before any backend ran. Only `send` has that two-positional shape today, but the failure looked like three broken backends and cost two diagnosis rounds. `normalize_global_args` now hoists *all* of a subcommand's options in front of its positionals (it previously moved only `--json`/`--state-dir`), reading the option table from the parser itself so new options are covered automatically. `--` still guards option-lookalike prompts, `--opt=value` is handled, and `peek --thinking`'s optional value stays in place. The command list is also derived from the parser, closing a latent gap where `watch`/`wait` were missing from the hardcoded set.

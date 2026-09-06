@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -30,11 +30,13 @@ HARNESS_SESSION_ENV = (("CODEX_THREAD_ID", "codex"), ("CLAUDE_CODE_SESSION_ID", 
 CDX_EFFORTS = ("medium", "high", "max")
 CODEX_DEFAULT_MODEL = "sol"
 CODEX_MODEL_ALIASES = {
+    "astra": "gpt-6-astra",
     "sol": "gpt-5.6-sol",
     "terra": "gpt-5.6-terra",
 }
 GROK_DEFAULT_MODEL = "grok-4.6"
-FABLE_EFFORTS = {"medium": "low", "high": "medium", "max": "xhigh"}
+CLAUDE_MODEL_ALIASES = {"fable": "claude-fable-5-1"}
+PREMIUM_EFFORTS = {"medium": "low", "high": "medium", "max": "high"}
 SPAWN_PREAMBLE = """[orchestration protocol] You are run non-interactively by an orchestrating
 agent. If you hit a decision you cannot make yourself (missing access,
 ambiguous requirement, a destructive or irreversible choice), do not guess:
@@ -532,13 +534,18 @@ def resolve_execution(backend: str, effort: str, model: str | None) -> tuple[str
     if backend == "codex":
         alias = (model or CODEX_DEFAULT_MODEL).lower()
         model = CODEX_MODEL_ALIASES.get(alias, model)
+    if backend == "claude" and model:
+        model = CLAUDE_MODEL_ALIASES.get(model.lower(), model)
     if backend == "grok" and not model:
         # pin the concrete model instead of riding grok's rolling default, so a
         # task's provider model is recorded and a provider-side default flip
         # cannot change what runs mid-flight
         model = GROK_DEFAULT_MODEL
-    if backend == "claude" and is_fable_model(model):
-        return model, FABLE_EFFORTS[effort]
+    if (backend == "claude" and is_fable_model(model)) or (
+        backend == "codex" and model and
+        (model.lower() == "gpt-6-astra" or model.lower().startswith("gpt-6-astra-"))
+    ):
+        return model, PREMIUM_EFFORTS[effort]
     provider_effort = backend_effort(backend, effort)
     assert provider_effort is not None
     return model, provider_effort
@@ -1949,15 +1956,15 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("--name")
     spawn.add_argument(
         "--model",
-        help="model tier for this task; codex: sol|terra (default sol), claude: opus|sonnet; raw provider model names pass through",
+        help="model tier for this task; codex: sol|terra|astra (default sol), claude: opus|sonnet|fable; Astra/Fable on user request; raw provider model names pass through",
     )
     spawn.add_argument(
         "--effort",
         choices=CDX_EFFORTS,
         default="medium",
         help=(
-            "reasoning dial, uniform across backends: medium=medium, high=high, max=xhigh "
-            "(Fable override: medium=low, high=medium, max=xhigh)"
+            "reasoning dial, standard mapping: medium=medium, high=high, max=xhigh "
+            "(Astra/Fable override: medium=low, high=medium, max=high)"
         ),
     )
     spawn.add_argument("--no-preamble", action="store_true")
