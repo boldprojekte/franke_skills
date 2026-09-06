@@ -3,23 +3,31 @@
 
 from __future__ import annotations
 
+import sys
+
+VERSION = "0.12.0"
+if __name__ == "__main__" and sys.argv[1:] in (["--version"], ["-v"], ["-V"]):
+    print(VERSION)
+    sys.exit(0)
+
 import argparse
 import errno
 import io
 import json
+import math
 import os
 import random
 import re
 import shutil
+import shlex
+from decimal import Decimal
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.11.0"
 DEFAULT_STATE_DIR = "~/.codex-agents"
 TERMINAL_STATES = {"awaiting_reply", "done", "failed", "killed", "stalled"}
 ATTENTION_ORDER = {"awaiting_reply": 0, "failed": 1, "stalled": 2, "working": 3}
@@ -55,6 +63,7 @@ class CdxError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.usage: str | None = None
 
 
 class CodexBackend:
@@ -859,18 +868,18 @@ def edit_distance(a: str, b: str) -> int:
 
 
 def resolve_task(root: Path, name: str) -> tuple[str, Path]:
+    if not valid_task_name(name):
+        raise CdxError(2, "task name must use lowercase letters, digits, and hyphens")
     exact = task_dir(root, name)
-    if exact.exists():
+    if exact.is_dir() and (exact / "meta.json").is_file():
         return name, exact
-    names = [path.name for path in tasks_dir(root).glob("*") if path.is_dir()] if tasks_dir(root).exists() else []
-    if not names:
-        raise CdxError(3, f"unknown task {name}; run cdx list --all to see tasks")
-    closest = min(names, key=lambda candidate: edit_distance(name, candidate))
-    distance = edit_distance(name, closest)
-    if distance <= 2:
-        eprint(f"note: task {name} not found; using near match {closest}")
-        return closest, task_dir(root, closest)
-    raise CdxError(3, f"unknown task {name}; did you mean {closest}?")
+    names = sorted(path.parent.name for path in tasks_dir(root).glob("*/meta.json"))
+    hint = ""
+    if names:
+        closest = min(names, key=lambda candidate: edit_distance(name, candidate))
+        if edit_distance(name, closest) <= 2:
+            hint = f"; did you mean {closest}? Use the exact task name."
+    raise CdxError(3, f"unknown task {name}{hint}")
 
 
 def status_payload(name: str, tdir: Path) -> dict[str, Any]:
@@ -1032,6 +1041,7 @@ def spawn_task(args: argparse.Namespace) -> int:
     if tdir.exists():
         raise CdxError(4, f"task {name} already exists; choose --name or use cdx send {name}")
     prompt = with_preamble(read_prompt(args), SPAWN_PREAMBLE, args.no_preamble)
+    backend_bin = locate_backend(backend)
     tdir.mkdir(parents=True)
     (tdir / "turns").mkdir()
     (tdir / "prompt.md").write_text(prompt, encoding="utf-8")
@@ -1060,7 +1070,6 @@ def spawn_task(args: argparse.Namespace) -> int:
     }
     meta["turn_launched_at"] = meta["spawned_at"]
     save_meta(tdir, meta)
-    backend_bin = locate_backend(backend)
     pid = launch_helper(root, name, tdir / "prompt.md", "spawn", args.stall_after, args.hard_kill_after, backend, backend_bin)
     meta = load_meta(tdir)
     if not meta.get("pid"):
@@ -1178,11 +1187,124 @@ def run_turn(args: argparse.Namespace) -> int:
     return 0
 
 
-def emit(args: argparse.Namespace, data: Any, human: str) -> None:
+def toon_quote(value: str) -> str:
+    # TOON permits \n/\r/\t escapes; other control characters use Unicode escapes.
+    escapes = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    return '"' + "".join(escapes.get(char, f"\\u{ord(char):04x}" if ord(char) < 32 else char) for char in value) + '"'
+
+
+def toon_scalar(value: Any) -> str:
+    if isinstance(value, str):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_./ -]*", value) and value.strip() == value and value not in {"true", "false", "null"}:
+            return value
+        return toon_quote(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "null"
+        if value == 0:
+            return "0"
+        if 1e-6 <= abs(value) < 1e21:
+            decimal = format(Decimal(str(value)), "f")
+            return decimal.rstrip("0").rstrip(".") if "." in decimal else decimal
+    return json.dumps(value, ensure_ascii=False)
+
+
+def toon_key(value: str) -> str:
+    return value if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) else toon_quote(value)
+
+
+def toon_lines(value: Any, key: str | None = None, depth: int = 0) -> list[str]:
+    """Encode JSON-shaped CLI payloads with quoted strings and counted tables."""
+    pad = "  " * depth
+    name = toon_key(key) if key is not None else ""
+    if isinstance(value, dict):
+        lines = [pad + name + ":"] if key is not None else []
+        for field, item in value.items():
+            lines.extend(toon_lines(item, field, depth + (key is not None)))
+        return lines
+    if isinstance(value, list):
+        header = f"{pad}{name}[{len(value)}]"
+        if not value or all(not isinstance(item, (dict, list)) for item in value):
+            return [header + ":" + (" " + ",".join(toon_scalar(item) for item in value) if value else "")]
+        fields = list(value[0]) if isinstance(value[0], dict) else []
+        uniform = fields and all(
+            isinstance(item, dict) and list(item) == fields
+            and all(not isinstance(v, (dict, list)) for v in item.values())
+            for item in value
+        )
+        if (key is not None or depth == 0) and uniform:
+            columns = ",".join(toon_key(field) for field in fields)
+            rows = [pad + "  " + ",".join(toon_scalar(item[field]) for field in fields) for item in value]
+            return [header + "{" + columns + "}:"] + rows
+        lines = [header + ":"]
+        for item in value:
+            if isinstance(item, dict):
+                nested = toon_lines(item, depth=depth + 2)
+                lines.append(pad + "  -" + (" " + nested[0].lstrip() if nested else ""))
+                lines.extend(nested[1:])
+            elif isinstance(item, list):
+                nested = toon_lines(item, depth=depth + 1)
+                lines.append(pad + "  - " + nested[0].lstrip())
+                lines.extend(nested[1:])
+            else:
+                lines.append(pad + "  - " + toon_scalar(item))
+        return lines
+    return [pad + (name + ": " if key is not None else "") + toon_scalar(value)]
+
+
+def command_hint(args: argparse.Namespace, command: str) -> str:
+    parts = [shlex.quote(sys.executable), shlex.quote(str(Path(__file__).resolve()))]
+    if getattr(args, "state_dir", None):
+        parts += ["--state-dir", shlex.quote(args.state_dir)]
+    return " ".join(parts) + " " + command
+
+
+def next_steps(args: argparse.Namespace, data: dict[str, Any]) -> list[str]:
+    name = data.get("task")
+    if name and getattr(args, "command", None) in {"spawn", "send", "status", "result"}:
+        name = shlex.quote(name)
+        state = data.get("state")
+        if state == "awaiting_reply":
+            return [command_hint(args, f'send {name} "<answer>"')]
+        if state in {"failed", "stalled", "killed"}:
+            return [command_hint(args, f"peek {name}"), command_hint(args, f'send {name} "<follow-up>"')]
+        if state == "working":
+            return [command_hint(args, f"result {name} --wait")]
+    return []
+
+
+def emit(args: argparse.Namespace, data: Any, human: str = "") -> None:
+    if isinstance(data, dict):
+        hints = next_steps(args, data)
+        if hints:
+            data = {**data, "help": hints}
     if getattr(args, "json", False):
         json_out(data)
     else:
-        print(human, flush=True)
+        print("\n".join(toon_lines(data if data else {"data": data})), flush=True)
+
+
+def compact_task(row: dict[str, Any]) -> dict[str, Any]:
+    activity = row.get("question") or row.get("last_activity") or ""
+    if row.get("stall_suspect"):
+        activity = f"quiet {fmt_age(row.get('quiet_for_s'))}: {activity}"
+    return {"task": row["task"], "state": row["state"], "age_s": row["age_s"], "activity": condense(activity, 300)}
+
+
+def home(args: argparse.Namespace) -> int:
+    args.all, args.any_owner, args.repo = False, False, None
+    root = state_root(args)
+    rows, skipped = owned_rows(root, args)
+    binary = str(Path(__file__).resolve())
+    user_home = str(Path.home())
+    if binary.startswith(user_home + "/"):
+        binary = "~" + binary[len(user_home):]
+    emit(args, {"bin": binary, "description": "Supervise detached coding agents: start, observe, steer, collect.",
+                "owner": task_owner(), "count": len(rows), "tasks": [compact_task(row) for row in rows],
+                "skipped_foreign": skipped,
+                "help": [command_hint(args, 'spawn -C "<repo>" -f "<work-order.md>"'),
+                         command_hint(args, "list --all"), command_hint(args, "--help")]})
+    return 0
 
 
 def owned_rows(root: Path, args: argparse.Namespace) -> tuple[list[dict[str, Any]], int]:
@@ -1226,14 +1348,21 @@ def list_tasks(args: argparse.Namespace) -> int:
     root = state_root(args)
     ensure_state(root)
     rows, skipped_foreign = owned_rows(root, args)
-    if args.json:
-        json_out({"tasks": rows, "skipped_foreign": skipped_foreign})
-    else:
-        for row in rows:
-            q = f" question={condense(row['question'])}" if row.get("question") else ""
-            print(f"{row['task']} {row['state']} {row['repo']}{q}")
-        if skipped_foreign:
-            print(f"(skipped {skipped_foreign} task(s) owned by other sessions; use --any-owner to see them, or -C <repo> for one repo's tasks)")
+    shown = rows if args.full else [compact_task(row) for row in rows]
+    if args.fields:
+        fields = args.fields.split(",")
+        allowed = {"task", "state", "age_s", "activity", "backend", "model", "effort", "provider_effort", "owner", "repo", "last_output_age_s", "last_activity", "question", "stall_suspect", "quiet_for_s"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise CdxError(2, "unknown fields: " + ", ".join(sorted(unknown)) + "; valid: " + ", ".join(sorted(allowed)))
+        shown = [{field: {**row, **compact_task(row)}[field] for field in fields} for row in rows]
+    scope = (" --any-owner" if args.any_owner else "") + (" -C " + shlex.quote(args.repo) if args.repo else "")
+    hints = [command_hint(args, "status <task>")] if rows else [command_hint(args, 'spawn -C "<repo>" -f "<work-order.md>"')]
+    if not args.all:
+        hints.append(command_hint(args, "list --all" + scope))
+    if skipped_foreign and not args.any_owner:
+        hints.append(command_hint(args, "list --all --any-owner"))
+    emit(args, {"count": len(rows), "tasks": shown, "skipped_foreign": skipped_foreign, "help": hints})
     return 0
 
 
@@ -1450,7 +1579,7 @@ def wait_fleet(args: argparse.Namespace) -> int:
         summary.pop("event")  # `wait` says `reason`; `event` is watch's vocabulary
         data.update(summary)
     else:
-        data["tasks"] = rows
+        data["tasks"] = [compact_task(row) for row in rows]
     if skipped_foreign:
         data["skipped_foreign"] = skipped_foreign
     if events:
@@ -1466,20 +1595,11 @@ def status_task(args: argparse.Namespace) -> int:
     ensure_state(root)
     name, tdir = resolve_task(root, args.task)
     payload = status_payload(name, tdir)
-    emit(args, payload, f"{payload['task']} {payload['state']} pid_alive={payload['pid_alive']} repo={payload['repo']}")
-    return state_exit(payload["state"])
+    if not args.full:
+        payload = {key: payload[key] for key in ("task", "state", "backend", "model", "provider_effort", "age_s", "last_output_age_s", "last_activity", "question", "stall_suspect") if payload[key] is not None}
+    emit(args, payload)
+    return 0
 
-
-def state_exit(state: str) -> int:
-    if state == "done":
-        return 0
-    if state == "working":
-        return 10
-    if state == "awaiting_reply":
-        return 11
-    if state == "stalled":
-        return 12
-    return 13
 
 
 def summarize_claude_event(event: dict[str, Any]) -> str | None:
@@ -1575,13 +1695,8 @@ def peek_task(args: argparse.Namespace) -> int:
     if args.thinking is not None:
         chars = min(int(args.thinking), 1500)
         thinking = BACKENDS.get(backend, BACKENDS["codex"]).thinking_tail(tdir, events, chars)
-    if args.json:
-        json_out({"task": name, "backend": backend, "items": lines, "thinking": thinking})
-    else:
-        for line in lines:
-            print(line)
-        if thinking is not None:
-            print(thinking)
+    emit(args, {"task": name, "backend": backend, "items": lines, "thinking": thinking,
+                "help": [command_hint(args, f"peek {shlex.quote(name)} --full")] if lines else []})
     return 0
 
 
@@ -1603,7 +1718,7 @@ def result_task(args: argparse.Namespace) -> int:
         time.sleep(1)
     if payload["state"] == "working":
         # a wait that runs out is not a failure and must not be shaped like one: the
-        # task is simply still running, which is what exit 10 means everywhere else
+        # task is simply still running, which is reported in the state field
         # in this CLI. Session liveness is `watch`'s job, not this timeout's.
         data = {
             "task": name,
@@ -1616,7 +1731,7 @@ def result_task(args: argparse.Namespace) -> int:
             "last_activity": payload["last_activity"],
         }
         emit(args, data, f"{name} still working (waited {fmt_age(data['waited_s'])}); the task keeps running, inspect with status/peek")
-        return 10
+        return 0
     events = read_events(tdir)
     meta = load_meta(tdir)
     backend = meta_backend(meta)
@@ -1632,7 +1747,7 @@ def result_task(args: argparse.Namespace) -> int:
         "duration_s": payload["age_s"],
     }
     emit(args, data, message)
-    return 11 if payload["state"] == "awaiting_reply" else (0 if payload["state"] == "done" else 13)
+    return 0
 
 
 def send_task(args: argparse.Namespace) -> int:
@@ -1642,11 +1757,12 @@ def send_task(args: argparse.Namespace) -> int:
     payload = status_payload(name, tdir)
     if payload["state"] == "working" and not args.now:
         raise CdxError(4, "task is running; use --now to interrupt-and-redirect, or wait for result")
+    prompt = with_preamble(read_prompt(args), SEND_PREAMBLE, args.no_preamble)
+    backend_bin = locate_backend(meta_backend(load_meta(tdir)))
     if payload["state"] in {"working", "stalled"}:
         # stalled means the watchdog already killed the process; interrupt is a
         # safety net in case that kill failed, so no --now gate is needed
         interrupt_pid(payload.get("pid"))
-    prompt = with_preamble(read_prompt(args), SEND_PREAMBLE, args.no_preamble)
     turns_dir = tdir / "turns"
     turns_dir.mkdir(exist_ok=True)
     meta = load_meta(tdir)
@@ -1662,7 +1778,6 @@ def send_task(args: argparse.Namespace) -> int:
     meta["turns_launched"] = completed + 1
     meta["turn_launched_at"] = now()
     save_meta(tdir, meta)
-    backend_bin = locate_backend(backend)
     pid = launch_helper(root, name, prompt_path, "resume", args.stall_after, args.hard_kill_after, backend, backend_bin)
     meta = load_meta(tdir)
     data = {
@@ -1809,10 +1924,7 @@ def config_get(args: argparse.Namespace) -> int:
     root = state_root(args)
     ensure_state(root)
     data = load_config(root)
-    if args.json:
-        json_out(data)
-    else:
-        print(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False))
+    emit(args, data)
     return 0
 
 
@@ -1914,15 +2026,32 @@ def doctor(args: argparse.Namespace) -> int:
                 if meta.get("state") == "working" and not pid_alive(meta.get("pid")):
                     orphans += 1
     checks.append({"name": "orphaned tasks", "ok": True, "detail": str(orphans), "fix": "run cdx status TASK to auto-heal working tasks to failed"})
-    if args.json:
-        json_out({"checks": checks})
-    else:
-        for check in checks:
-            label = str(check.get("severity") or ("pass" if check["ok"] else "fail"))
-            print(f"{label} {check['name']}: {check['detail']}")
-            if label != "pass" and check.get("fix"):
-                print(f"  fix: {check['fix']}")
-    return 0
+    emit(args, {"checks": checks})
+    return 0 if all(check["ok"] for check in checks) else 1
+
+
+COMMAND_GUIDE = {
+    "cdx": ("Supervise detached coding agents. With no command, show this session's tasks. Exit 0: call succeeded; 1: operation failed; 2: invalid input. Read task state in the response.", ["spawn -C <repo> -f <work-order.md>", "list", "wait"]),
+    "spawn": ("Start a detached worker. Prompt: positional text OR repeatable -f files. Returns immediately; the worker keeps running.", ['-C <repo> -f <role.md> -f <work-order.md>', '-C <repo> --backend codex --model astra --effort high "<prompt>"']),
+    "list": ("Show this session's tasks, attention first. -C additionally includes that repo across sessions; --any-owner includes every session.", ["", "--full", "--fields task,state,model"]),
+    "status": ("Inspect one exact task name. State is working, awaiting_reply, done, failed, stalled or killed. Successful inspection exits 0 in every state.", ["<task>", "<task> --full"]),
+    "peek": ("Inspect recent activity. Summaries are bounded; --full returns the complete latest agent message. --thinking reads a bounded reasoning tail.", ["<task>", "<task> --full"]),
+    "result": ("Read the complete latest result or a still-working response. --wait expiry leaves the worker running. Read state; every successful read exits 0.", ["<task>", "<task> --wait --timeout 60"]),
+    "send": ("Answer or continue the same task. --now interrupts a working turn before redirecting it; otherwise a running task is refused. Prompt: text OR -f files.", ['<task> "<answer>"', '<task> --now -f <revised-work-order.md>']),
+    "watch": ("Stream task changes until stopped. Use --json for one event per line. Arm once only when your harness can deliver background events.", ["--json", "--once"]),
+    "wait": ("Wait for a fleet change, timeout, or idle state. Call again while tasks run. A harness yield is not completion: keep polling the same process.", ["", "--timeout 60"]),
+    "kill": ("Stop an exact task. Already-terminal tasks are a successful no-op. The task remains resumable with send.", ["<task>", "<task> --json"]),
+    "clean": ("Remove terminal task data after collecting results. Live tasks are preserved. Select exactly one of --task, --terminal, --all.", ["--terminal --dry-run", "--task <task>"]),
+    "config": ("Inspect or change machine-level model defaults. Change these only on user request.", ["get", "set model.codex sol", "unset model.codex"]),
+    "get": ("Read machine-level model defaults.", ["", "--json"]),
+    "set": ("Set a model default. A spawn --model override takes precedence.", ["model.codex sol", "model.claude opus"]),
+    "unset": ("Remove a model default; an absent key is a successful no-op.", ["model.codex", "model.claude"]),
+    "doctor": ("Check backend availability and registry health. Exit 1 means a required check failed; optional backends may produce warnings.", ["", "--json"]),
+}
+
+
+class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    pass
 
 
 class NoAbbrevParser(argparse.ArgumentParser):
@@ -1932,20 +2061,35 @@ class NoAbbrevParser(argparse.ArgumentParser):
     the very argparse ordering bug the hoist works around, so the surface only
     accepts full option names."""
 
+    def format_help(self) -> str:
+        description, examples = COMMAND_GUIDE.get(self.prog.split()[-1], ("", []))
+        self.description = description
+        self.epilog = "Examples:\n" + "\n".join("  " + self.prog + (" " + example if example else "") for example in examples)
+        return super().format_help()
+
+    def error(self, message: str) -> None:
+        exc = CdxError(2, message)
+        exc.usage = self.format_help()
+        raise exc
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("allow_abbrev", False)
+        kwargs.setdefault("formatter_class", HelpFormatter)
         super().__init__(*args, **kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = NoAbbrevParser(prog="cdx")
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--state-dir")
-    sub = parser.add_subparsers(dest="command", required=True, parser_class=NoAbbrevParser)
+    parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    parser.add_argument("-v", "-V", "--version", action="version", version=VERSION)
+    parser.add_argument("--state-dir", help="task registry path (default ~/.codex-agents)")
+    parser.set_defaults(func=home)
+    sub = parser.add_subparsers(dest="command", parser_class=NoAbbrevParser)
 
     def globals_for(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-        sp.add_argument("--state-dir", default=argparse.SUPPRESS)
+        sp.add_argument("--state-dir", default=argparse.SUPPRESS, help="override task registry path")
+        sp.add_argument("-v", "-V", "--version", action="version", version=VERSION)
 
     spawn = sub.add_parser("spawn")
     globals_for(spawn)
@@ -1974,7 +2118,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     listing = sub.add_parser("list")
     globals_for(listing)
-    listing.add_argument("--all", action="store_true")
+    listing.add_argument("--all", action="store_true", help="include terminal tasks older than 24 hours")
+    listing.add_argument("--full", action="store_true", help="include execution and ownership details")
+    listing.add_argument("--fields", help="comma-separated task fields, e.g. task,state,model")
     listing.add_argument("--any-owner", action="store_true", help="include tasks owned by other sessions (default: only your own; foreign tasks surface as a skipped_foreign count)")
     listing.add_argument("-C", "--repo", help="also show tasks that target this repo, regardless of the cwd they were spawned from")
     listing.set_defaults(func=list_tasks)
@@ -2008,6 +2154,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status")
     globals_for(status)
     status.add_argument("task")
+    status.add_argument("--full", action="store_true", help="include process, usage and event diagnostics")
     status.set_defaults(func=status_task)
 
     peek = sub.add_parser("peek")
@@ -2022,7 +2169,7 @@ def build_parser() -> argparse.ArgumentParser:
     globals_for(result)
     result.add_argument("task")
     result.add_argument("--wait", action="store_true")
-    result.add_argument("--timeout", type=int, default=3600, help="upper bound on --wait; on expiry it returns exit 10 (still working) with the task untouched. Session liveness is cdx watch's job, so this bound only has to stop a wait from hanging forever")
+    result.add_argument("--timeout", type=int, default=3600, help="seconds to wait; expiry returns state=working and leaves the task untouched")
     result.set_defaults(func=result_task)
 
     send = sub.add_parser("send")
@@ -2078,6 +2225,7 @@ def build_parser() -> argparse.ArgumentParser:
     helper.add_argument("--backend", choices=list(BACKENDS), required=True)
     helper.add_argument("--backend-bin", required=True)
     helper.set_defaults(func=run_turn)
+    sub.metavar = "{" + ",".join(name for name in sub.choices if not name.startswith("__")) + "}"
     return parser
 
 
@@ -2150,19 +2298,42 @@ def normalize_global_args(argv: list[str], parser: argparse.ArgumentParser) -> l
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
+    args = argparse.Namespace(json="--json" in raw, state_dir=None, command=None)
+    # Preserve registry scope even when subcommand parsing fails before namespace merge.
+    for index, token in enumerate(raw[:raw.index("--")] if "--" in raw else raw):
+        if token.startswith("--state-dir="):
+            args.state_dir = token.split("=", 1)[1]
+        elif token == "--state-dir" and index + 1 < len(raw):
+            args.state_dir = raw[index + 1]
     try:
-        args = parser.parse_args(normalize_global_args(list(sys.argv[1:] if argv is None else argv), parser))
+        normalized = normalize_global_args(raw, parser)
+        args = parser.parse_args(normalized, namespace=args)
         return int(args.func(args))
     except CdxError as exc:
-        eprint(f"error: {exc.message}")
-        return exc.code
+        data = {"error": exc.message, "code": "usage" if exc.code == 2 else "operation_failed"}
+        if exc.code == 2:
+            subcommands = next(action.choices for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+            selected = next((subcommands[token] for token in raw if token in subcommands), parser)
+            data["usage"] = selected.format_help().strip()
+        if exc.code == 3:
+            data["help"] = [command_hint(args, "list --all --any-owner")]
+        elif exc.code == 4 and getattr(args, "task", None):
+            task = shlex.quote(args.task)
+            data["help"] = [command_hint(args, f"status {task}")]
+            if args.command == "send":
+                data["help"] = [command_hint(args, f"result {task} --wait"), command_hint(args, f'send {task} --now "<revised-prompt>"')]
+        elif exc.code != 2:
+            data["help"] = [command_hint(args, "doctor")]
+        emit(args, data)
+        return 2 if exc.code == 2 else 1
     except KeyboardInterrupt:
-        eprint("error: interrupted; rerun status or result to inspect task state")
-        return 5
-    except Exception as exc:  # noqa: BLE001 - top-level contract forbids tracebacks.
-        eprint(f"error: internal failure: {exc}")
-        return 5
+        emit(args, {"error": "interrupted", "help": [command_hint(args, "list")]})
+        return 1
+    except Exception as exc:  # noqa: BLE001 - keep errors machine-readable without tracebacks.
+        emit(args, {"error": str(exc), "help": [command_hint(args, "doctor")]})
+        return 1
 
 
 if __name__ == "__main__":

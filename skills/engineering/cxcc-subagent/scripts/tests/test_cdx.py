@@ -100,7 +100,7 @@ class ParserNormalizationTests(unittest.TestCase):
     def test_option_abbreviations_are_rejected(self):
         # an abbreviated option would bypass the hoist and hit the argparse bug,
         # so the parser refuses prefixes outright
-        with self.assertRaises(SystemExit) as ctx:
+        with self.assertRaises(cdx.CdxError) as ctx:
             with open(os.devnull, "w") as devnull:
                 stderr, sys.stderr = sys.stderr, devnull
                 try:
@@ -376,7 +376,7 @@ class GrokBackendTests(TempCase):
         parser = cdx.build_parser()
         parsed = parser.parse_args(["spawn", "-C", str(self.base), "--backend", "grok", "hello"])
         self.assertEqual(parsed.backend, "grok")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(cdx.CdxError):
             parser.parse_args(["spawn", "-C", str(self.base), "--backend", "nonesuch", "hello"])
 
 
@@ -431,8 +431,8 @@ class TurnAccountingRaceTests(TempCase):
         state, tdir = self.make_race_task()
         events_path = tdir / "events.jsonl"
 
-        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "race-task"])
-        self.assertEqual(status.returncode, 10, status.stderr)
+        status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "race-task"])
+        self.assertEqual(status.returncode, 0, status.stderr)
         data = json.loads(status.stdout)
         self.assertEqual(data["state"], "working")
         self.assertEqual(data["turns_launched"], 2)
@@ -542,7 +542,7 @@ class WatchdogTests(TempCase):
         deadline = time.time() + timeout
         last = None
         while time.time() < deadline:
-            last = self.run_cdx(["status", "--json", "--state-dir", str(state), task], env=env)
+            last = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), task], env=env)
             data = json.loads(last.stdout)
             if predicate(data):
                 return last, data
@@ -565,12 +565,12 @@ class WatchdogTests(TempCase):
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
         status, data = self.poll_until(state, "quiet-test", lambda d: d["stall_suspect"], env)
         self.assertEqual(data["state"], "working")
-        self.assertEqual(status.returncode, 10)
+        self.assertEqual(status.returncode, 0)
         self.assertTrue(data["pid_alive"], "the worker was killed even though only the soft threshold was set")
         self.assertGreaterEqual(data["quiet_for_s"], 2)
         # and it stays alive: the flag is a report, not a delayed kill
         time.sleep(5)
-        still = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "quiet-test"], env=env).stdout)
+        still = json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "quiet-test"], env=env).stdout)
         self.assertEqual((still["state"], still["pid_alive"]), ("working", True))
         self.run_cdx(["kill", "--json", "--state-dir", str(state), "quiet-test"], env=env)
 
@@ -590,7 +590,7 @@ class WatchdogTests(TempCase):
         _, flagged = self.poll_until(state, "stall-test", lambda d: d["stall_suspect"], env)
         self.assertEqual(flagged["state"], "working")
         last, data = self.poll_until(state, "stall-test", lambda d: d["state"] == "stalled", env)
-        self.assertEqual(last.returncode, 12)
+        self.assertEqual(last.returncode, 0)
         self.assertIn("hard limit", data["stall_reason"])
         # a killed task is no longer a live suspect
         self.assertFalse(data["stall_suspect"])
@@ -641,7 +641,7 @@ class CliSubprocessTests(TempCase):
         deadline = time.time() + 10
         status = None
         while time.time() < deadline:
-            status = self.run_cdx(["status", "--json", "--state-dir", str(state), "cli-task"], env=env)
+            status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "cli-task"], env=env)
             data = self.assert_json_stdout(status)
             if data["state"] == "done":
                 break
@@ -651,7 +651,7 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(data["model"], "gpt-5.6-sol")
         self.assertEqual(data["provider_effort"], "medium")
 
-        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
+        listing = self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all"], env=env)
         self.assertEqual(listing.returncode, 0, listing.stderr)
         listing_data = self.assert_json_stdout(listing)
         self.assertIsInstance(listing_data, dict)
@@ -675,7 +675,7 @@ class CliSubprocessTests(TempCase):
         self.assert_json_stdout(send)
         deadline = time.time() + 10
         while time.time() < deadline:
-            status = self.run_cdx(["status", "--json", "--state-dir", str(state), "cli-task"], env=env)
+            status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "cli-task"], env=env)
             data = self.assert_json_stdout(status)
             if data["state"] == "done":
                 break
@@ -686,7 +686,7 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(kill.returncode, 0, kill.stderr)
         # spec: kill on an already-terminal task is a strict no-op — state is reported, not rewritten
         self.assertEqual(self.assert_json_stdout(kill)["state"], "done")
-        status_after = self.run_cdx(["status", "--json", "--state-dir", str(state), "cli-task"], env=env)
+        status_after = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "cli-task"], env=env)
         self.assertEqual(self.assert_json_stdout(status_after)["state"], "done")
 
         doctor = self.run_cdx(["doctor", "--json", "--state-dir", str(state)], env=env)
@@ -714,10 +714,10 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
         deadline = time.time() + 10
         while time.time() < deadline:
-            status = self.run_cdx(["status", "--json", "--state-dir", str(state), "question-task"], env=env)
+            status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "question-task"], env=env)
             data = self.assert_json_stdout(status)
             if data["state"] == "awaiting_reply":
-                self.assertEqual(status.returncode, 11)
+                self.assertEqual(status.returncode, 0)
                 self.assertEqual(data["question"], "First line\nSecond line")
                 return
             time.sleep(0.2)
@@ -730,9 +730,9 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(result.returncode, 2)
         # argparse quotes choices on 3.10/3.11 but not on 3.12+, so match each
         # choice individually instead of the joined list.
-        self.assertIn("invalid choice", result.stderr)
+        self.assertIn("invalid choice", json.loads(result.stdout)["error"])
         for choice in ("medium", "high", "max"):
-            self.assertIn(choice, result.stderr)
+            self.assertIn(choice, json.loads(result.stdout)["error"])
 
     def test_spawn_help_explains_model_tiers_and_effort_dial(self):
         other = self.base / "other"
@@ -816,6 +816,7 @@ class CliSubprocessTests(TempCase):
         self.assertEqual(unset_meta["provider_effort"], "medium")
 
 
+@unittest.skipUnless(os.environ.get("CDX_LIVE_SMOKE") == "1", "set CDX_LIVE_SMOKE=1 to run paid provider smoke tests")
 class RealBackendSmokeTests(TempCase):
     def run_cdx(self, args, env=None, cwd=None, timeout=120):
         full_env = base_env(env)
@@ -833,7 +834,7 @@ class RealBackendSmokeTests(TempCase):
         deadline = time.time() + timeout
         last = None
         while time.time() < deadline:
-            last = self.run_cdx(["status", "--json", "--state-dir", str(state), task], timeout=30)
+            last = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), task], timeout=30)
             data = json.loads(last.stdout)
             if data["state"] == want:
                 return last, data
@@ -872,8 +873,8 @@ class RealBackendSmokeTests(TempCase):
         spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "real-question", "--stall-after", "120", prompt], timeout=30)
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
         self.poll_state(state, "real-question", "awaiting_reply", timeout=240)
-        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "real-question"], timeout=30)
-        self.assertEqual(status.returncode, 11, status.stderr)
+        status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "real-question"], timeout=30)
+        self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("answer.txt", json.loads(status.stdout)["question"])
         send = self.run_cdx(
             ["send", "--json", "--state-dir", str(state), "real-question", "--stall-after", "120", "Use hi. Create answer.txt containing exactly hi, verify it, then summarize."],
@@ -999,7 +1000,7 @@ class OwnerScopingTests(TempCase):
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
         deadline = time.time() + 30
         while time.time() < deadline:
-            status = self.run_cdx(["status", "--json", "--state-dir", str(state), name], env={"CDX_CODEX_BIN": self.fake_bin})
+            status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), name], env={"CDX_CODEX_BIN": self.fake_bin})
             if json.loads(status.stdout)["state"] == "done":
                 return
             time.sleep(0.2)
@@ -1046,7 +1047,7 @@ class OwnerScopingTests(TempCase):
         self.spawn_done(state, repo, "bob-one", "bob")
 
         # owner is surfaced in status and list
-        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "alice-one"], env={"CDX_CODEX_BIN": self.fake_bin})
+        status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "alice-one"], env={"CDX_CODEX_BIN": self.fake_bin})
         self.assertEqual(json.loads(status.stdout)["owner"], "alice")
 
         # alice's sweep leaves bob's uncollected task and reports the skip
@@ -1056,7 +1057,7 @@ class OwnerScopingTests(TempCase):
         self.assertEqual(sorted(data["removed"]), ["alice-one", "alice-two"])
         self.assertEqual(data["skipped_foreign"], 1)
 
-        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin})
+        listing = self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all", "--any-owner"], env={"CDX_CODEX_BIN": self.fake_bin})
         remaining = json.loads(listing.stdout)["tasks"]
         self.assertEqual([t["task"] for t in remaining], ["bob-one"])
         self.assertEqual(remaining[0]["owner"], "bob")
@@ -1076,18 +1077,18 @@ class OwnerScopingTests(TempCase):
         self.spawn_done(state, other_repo, "bob-one", "bob")
 
         as_alice = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": "alice"}
-        scoped = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=as_alice)
+        scoped = self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all"], env=as_alice)
         self.assertEqual(scoped.returncode, 0, scoped.stderr)
         data = json.loads(scoped.stdout)
         self.assertEqual([t["task"] for t in data["tasks"]], ["alice-one"])
         self.assertEqual(data["skipped_foreign"], 1)
 
-        global_view = json.loads(self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "--any-owner"], env=as_alice).stdout)
+        global_view = json.loads(self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all", "--any-owner"], env=as_alice).stdout)
         self.assertEqual(sorted(t["task"] for t in global_view["tasks"]), ["alice-one", "bob-one"])
         self.assertEqual(global_view["skipped_foreign"], 0)
 
         # -C <repo> pulls in that repo's tasks across owners, on top of your own
-        repo_view = json.loads(self.run_cdx(["list", "--json", "--state-dir", str(state), "--all", "-C", str(other_repo)], env=as_alice).stdout)
+        repo_view = json.loads(self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all", "-C", str(other_repo)], env=as_alice).stdout)
         self.assertEqual(sorted(t["task"] for t in repo_view["tasks"]), ["alice-one", "bob-one"])
         self.assertEqual(repo_view["skipped_foreign"], 0)
 
@@ -1117,7 +1118,7 @@ class OwnerScopingTests(TempCase):
         env = {"CDX_CODEX_BIN": self.fake_bin, "CDX_OWNER": ""}  # empty → falls back to cwd
         spawn = self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "cwd-task", "hi"], env=env, cwd=worktree)
         self.assertEqual(spawn.returncode, 0, spawn.stderr)
-        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "cwd-task"], env=env)
+        status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "cwd-task"], env=env)
         self.assertEqual(json.loads(status.stdout)["owner"], str(worktree.resolve()))
 
     def start_running_task(self, state, repo, name, env):
@@ -1126,7 +1127,7 @@ class OwnerScopingTests(TempCase):
         pid = None
         deadline = time.time() + 30  # generous: only the failure path waits this long
         while time.time() < deadline:
-            status = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), name], env=env).stdout)
+            status = json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), name], env=env).stdout)
             if status.get("pid") and status.get("pid_alive"):
                 pid = status["pid"]
                 break
@@ -1153,7 +1154,7 @@ class OwnerScopingTests(TempCase):
 
         # cleaning it by name errors (kill first), rather than racing the supervisor
         by_name = self.run_cdx(["clean", "--json", "--state-dir", str(state), "--task", "runner"], env=env)
-        self.assertEqual(by_name.returncode, 4, by_name.stdout)
+        self.assertEqual(by_name.returncode, 1, by_name.stdout)
         self.assertTrue(runner_dir.exists())
 
         # kill first: it moves the task to a terminal state, which is what clean needs.
@@ -1164,7 +1165,7 @@ class OwnerScopingTests(TempCase):
         deadline = time.time() + 30
         killed_state = None
         while time.time() < deadline:
-            killed_state = json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "runner"], env=env).stdout)["state"]
+            killed_state = json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "runner"], env=env).stdout)["state"]
             if killed_state in cdx.TERMINAL_STATES:
                 break
             time.sleep(0.2)
@@ -1183,8 +1184,9 @@ class OwnerScopingTests(TempCase):
         while time.time() < deadline:
             self.assertFalse(runner_dir.exists(), "killed+cleaned task dir was resurrected")
             time.sleep(0.2)
-        listing = self.run_cdx(["list", "--json", "--state-dir", str(state), "--all"], env=env)
-        self.assertEqual(json.loads(listing.stdout), {"tasks": [], "skipped_foreign": 0})
+        listing = self.run_cdx(["list", "--full", "--json", "--state-dir", str(state), "--all"], env=env)
+        self.assertEqual(json.loads(listing.stdout)["tasks"], [])
+        self.assertEqual(json.loads(listing.stdout)["count"], 0)
 
 
 def row(task, state, **extra):
@@ -1314,7 +1316,7 @@ class WatchCliTests(TempCase):
         # otherwise clobber a state we stamp in the same breath as the spawn
         deadline = time.time() + 30
         while time.time() < deadline:
-            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(state), "alice-task"], env={"CDX_CODEX_BIN": str(fake)}).stdout)["output_bytes"]:
+            if json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "alice-task"], env={"CDX_CODEX_BIN": str(fake)}).stdout)["output_bytes"]:
                 break
             time.sleep(0.2)
 
@@ -1358,14 +1360,14 @@ class WatchCliTests(TempCase):
         result = self.run_cdx(["result", "--json", "--state-dir", str(state), "slow-task", "--wait", "--timeout", "2"], env=env)
         # exit 10 (still working), a real JSON payload on stdout, and nothing that
         # reads as "the agent died and needs resuming"
-        self.assertEqual(result.returncode, 10, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual(data["state"], "working")
         self.assertEqual(data["reason"], "timeout")
         self.assertGreaterEqual(data["waited_s"], 2)
         self.assertNotIn("error", result.stderr)
         # and the task itself was not touched by the expiry
-        status = self.run_cdx(["status", "--json", "--state-dir", str(state), "slow-task"], env=env)
+        status = self.run_cdx(["status", "--full", "--json", "--state-dir", str(state), "slow-task"], env=env)
         self.assertEqual(json.loads(status.stdout)["state"], "working")
         self.run_cdx(["kill", "--json", "--state-dir", str(state), "slow-task"], env=env)
 
@@ -1378,7 +1380,7 @@ class WatchCliTests(TempCase):
         env = {"CDX_CODEX_BIN": str(fake)}
         self.run_cdx(["spawn", "--json", "--state-dir", str(state), "-C", str(repo), "--name", "slow-task", "--stall-after", "120", "STALL_MODE"], env=env)
         result = self.run_cdx(["result", "--json", "--state-dir", str(state), "slow-task"], env=env)
-        self.assertEqual(result.returncode, 10, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         # --json used to promise pure JSON on stdout and then print nothing here
         data = json.loads(result.stdout)
         self.assertEqual((data["state"], data["reason"]), ("working", "no_wait"))
@@ -1406,7 +1408,7 @@ class WaitCliTests(TempCase):
         self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "bob-task", "hello"], env={"CDX_CODEX_BIN": self.fake, "CDX_OWNER": "bob"})
         deadline = time.time() + 30
         while time.time() < deadline:
-            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env={"CDX_CODEX_BIN": self.fake}).stdout)["output_bytes"]:
+            if json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(self.state), "alice-task"], env={"CDX_CODEX_BIN": self.fake}).stdout)["output_bytes"]:
                 break
             time.sleep(0.2)
 
@@ -1440,7 +1442,7 @@ class WaitCliTests(TempCase):
         self.assertEqual(len(data["working"]), 1)
         self.assertTrue(data["working"][0].startswith("alice-task working "), data["working"])
         self.assertNotIn("events", data)
-        self.assertEqual(json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"], "working")
+        self.assertEqual(json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"], "working")
         self.run_cdx(["kill", "--json", "--state-dir", str(self.state), "alice-task"], env=env)
 
     def test_wait_with_nothing_running_returns_at_once(self):
@@ -1451,7 +1453,7 @@ class WaitCliTests(TempCase):
         self.run_cdx(["spawn", "--json", "--state-dir", str(self.state), "-C", str(repo), "--name", "alice-task", "hello"], env=env)
         deadline = time.time() + 30
         while time.time() < deadline:
-            if json.loads(self.run_cdx(["status", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"] == "done":
+            if json.loads(self.run_cdx(["status", "--full", "--json", "--state-dir", str(self.state), "alice-task"], env=env).stdout)["state"] == "done":
                 break
             time.sleep(0.2)
         start = time.time()

@@ -23,9 +23,4 @@ jobs:
           python-version: "3.11"
       - name: Run fast tests
         working-directory: skills/engineering/cxcc-subagent/scripts/tests
-        run: |
-          python3 -m unittest -v \
-            test_cdx.StateDerivationTests \
-            test_cdx.TurnAccountingRaceTests \
-            test_cdx.WatchdogTests \
-            test_cdx.CliSubprocessTests
+        run: python3 -m unittest discover -v

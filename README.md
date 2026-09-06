@@ -69,9 +69,23 @@ python3 $CDX list --json
 python3 $CDX result <task> --json
 ```
 
-Every verb takes `--json`: stdout is pure JSON, diagnostics go to stderr. Answering a worker's question and steering a wrong turn share one verb (`send`), same thread, full context retained.
+TOON is the default output. Every verb also takes `--json`; successful responses and structured errors go to stdout. Diagnostics go to stderr. Answering a worker's question and steering a wrong turn share one verb (`send`), same thread, full context retained.
 
 When using the source checkout directly, replace `.agents/skills/cxcc-subagent` with `skills/engineering/cxcc-subagent`.
+
+### Agent ergonomics
+
+Run `python3 "$CDX"` for this session's task overview and concrete next commands. Use `--help` on a command for its arguments, defaults and examples. `-v`, `-V` and `--version` print the bare version without loading the command graph.
+
+Lists contain four fields per task; `list --full` exposes execution and ownership, and `list --fields task,state,model` selects fields. `status` shows the operational state; `status --full` adds process, usage and event diagnostics. `result` returns the complete final message. Task names are exact; typos produce suggestions without selecting another task.
+
+**Migration from 0.11:** successful reads now exit 0 even when a worker is running, awaiting a reply, stalled or failed. Branch on the response's `state` field. Exit 1 means the CLI operation failed; exit 2 means invalid input. Errors are structured on stdout, including with `--json`. Default list/status schemas are smaller; use `--full` when you need their diagnostic fields. Default output changed from free text to TOON; JSON remains available for scripts and event streams.
+
+The installable skill carries delegation policy and points to the CLI for syntax. Session hook installation is outside this release; loading the skill remains the entry point.
+
+### Verification
+
+From `skills/engineering/cxcc-subagent/scripts/tests`, run `python3 -m unittest discover -v`. The offline suite uses fake backends to exercise lifecycle, waiting, questions, steering, watchdog and cleanup. Real provider smoke tests require explicit opt-in: `CDX_LIVE_SMOKE=1 python3 -m unittest test_cdx.RealBackendSmokeTests` (uses provider quota).
 
 ### Model tiers and effort
 

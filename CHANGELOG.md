@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 (2026-09-06)
+
+- Add a session-scoped home view, fast version probes, TOON default output and contextual command help. JSON remains available.
+- Require exact task names; typos suggest candidates without redirecting actions. Validate prompts and backend availability before interruption or task creation.
+- **Breaking:** successful status/result/peek reads exit 0; inspect `state` for worker outcomes. CLI failures exit 1, usage errors exit 2, with structured errors on stdout. List/status default to compact views; use `--full` for diagnostics or `list --fields` for selected fields.
+- Condense the skill around delegation and verification; disclose monitoring/recovery details through a runtime reference.
+- Run the full offline suite in CI. Real-provider smoke tests are explicitly opt-in.
+
 ## 0.11.0 (2026-09-06)
 
 - Add the user-directed `astra` alias for GPT-6 Astra and pin `fable` to Claude Fable 5.1.
